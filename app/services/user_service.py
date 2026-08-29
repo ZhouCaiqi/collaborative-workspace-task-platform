@@ -7,6 +7,11 @@ from app.schemas import UserCreate
 from app.security import hash_password, verify_password
 from app.exceptions import UsernameAlreadyExistsError, InvalidCredentialsError
 
+import logging
+
+
+security_logger = logging.getLogger("app.security")
+
 
 def get_user_by_username(
     db: Session,
@@ -46,6 +51,11 @@ def create_user(
         db.rollback()
         raise
 
+    security_logger.info(
+        "user_registered user_id=%s",
+        db_user.id
+    )
+
     return db_user
 
 def authenticate_user(
@@ -58,11 +68,25 @@ def authenticate_user(
         username=username
     )
     if db_user is None:
+        security_logger.warning(
+            "login_failed username=%s",
+            username
+        )
         raise InvalidCredentialsError()
     verify_result = verify_password(
         plain_password=password,
         hashed_password=db_user.hashed_password
     )
     if verify_result is False:
+        security_logger.warning(
+            "login_failed username=%s",
+            username
+        )
         raise InvalidCredentialsError()
+
+    security_logger.info(
+        "login_success user_id=%s",
+        db_user.id
+    )
+    
     return db_user

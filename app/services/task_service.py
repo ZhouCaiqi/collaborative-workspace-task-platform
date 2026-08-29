@@ -5,6 +5,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from app.models import Task
 
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_tasks(
@@ -92,6 +96,12 @@ def create_task(
         db.rollback()
         raise
 
+    logger.info(
+        "task_created task_id=%s owner_id=%s",
+        db_task.id,
+        owner_id
+    )
+
     return db_task
 
 
@@ -118,6 +128,13 @@ def update_task(
         db.rollback()
         raise
 
+    logger.info(
+        "task_updated task_id=%s owner_id=%s fields=%s",
+        db_task.id,
+        owner_id,
+        list(update_data.keys())
+    )
+
     return db_task
 
 def delete_task(
@@ -139,5 +156,11 @@ def delete_task(
     except SQLAlchemyError:
         db.rollback()
         raise
+
+    logger.info(
+        "task_deleted task_id=%s owner_id=%s",
+        db_task.id,
+        owner_id
+    )
 
     return True
