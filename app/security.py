@@ -1,20 +1,12 @@
+from app.config import settings
 from pwdlib import PasswordHash
-import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from dotenv import load_dotenv
-
 from jwt.exceptions import InvalidTokenError
 
 
-load_dotenv()
-
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-if SECRET_KEY is None:
+if settings.secret_key is None:
     raise RuntimeError("SECRET_KEY is not configured")
 
 password_hash = PasswordHash.recommended()
@@ -35,7 +27,7 @@ def verify_password(
 
 def create_access_token(subject: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
-        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+        minutes=settings.access_token_expire_minutes
     )
 
     payload = {
@@ -45,16 +37,16 @@ def create_access_token(subject: str) -> str:
 
     return jwt.encode(
         payload,
-        SECRET_KEY,
-        algorithm=ALGORITHM
+        settings.secret_key,
+        algorithm=settings.algorithm
     )
 
 def decode_access_token(token: str) -> str | None:
     try:
         payload = jwt.decode(
             token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
+            settings.secret_key,
+            algorithms=[settings.algorithm]
         )
         return payload.get("sub")
     except InvalidTokenError:

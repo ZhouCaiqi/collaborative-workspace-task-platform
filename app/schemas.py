@@ -5,6 +5,10 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=100)
     completed: bool = False
     priority: int = Field(default=1, ge=1, le=5)
+    description: str | None = Field(
+        default=None,
+        max_length=500
+    )
 
 
 class TaskUpdate(BaseModel):
@@ -15,6 +19,10 @@ class TaskUpdate(BaseModel):
     )
     completed: bool | None = None
     priority: int | None = Field(default=None, ge=1, le=5)
+    description: str | None = Field(
+        default=None,
+        max_length=500
+    )
 
     @field_validator("title", "completed", "priority", mode="before")
     @classmethod
@@ -31,6 +39,7 @@ class TaskResponse(BaseModel):
     title: str
     completed: bool
     priority: int
+    description: str | None
 
 
 class TaskListResponse(BaseModel):

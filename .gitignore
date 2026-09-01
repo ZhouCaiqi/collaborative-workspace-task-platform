@@ -9,6 +9,7 @@ __pycache__/
 # 环境变量和密钥
 .env
 .env.*
+!.env.example
 
 # 日志
 *.log

@@ -63,6 +63,21 @@ def test_create_task(client, auth_headers):
     assert "owner_id" not in data
 
 
+def test_create_task_with_description(client, auth_headers):
+    response = client.post(
+        "/tasks/",
+        json={
+            "title": "Learn automated testing",
+            "completed": False,
+            "priority": 3,
+            "description": "learn over"
+        },
+        headers=auth_headers
+    )
+    assert response.status_code == 201
+    assert response.json()["description"] == "learn over"
+
+
 def test_get_task(client, auth_headers, created_task):
     task_id = created_task["id"]
     response = client.get(
