@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest
+httpx2
+pytest-cov
