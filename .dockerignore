@@ -1,0 +1,15 @@
+.git
+.gitignore
+
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+.env
+.DS_Store
+
+practice_files/
+CLAUDE.md

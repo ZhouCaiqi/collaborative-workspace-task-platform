@@ -1,4 +1,5 @@
-import pytest
+import pytest, os
+from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
@@ -8,11 +9,9 @@ import app.models  # 确保所有 ORM 模型注册到 Base.metadata
 from app.database import Base, get_db
 from app.main import app
 
+load_dotenv()
 
-TEST_DATABASE_URL = (
-    "mysql+pymysql://root@localhost/"
-    "task_management_test_db"
-)
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
 # 防止配置错误后误删开发数据库
 if make_url(TEST_DATABASE_URL).database != "task_management_test_db":

@@ -1,0 +1,44 @@
+services:
+  # ============ 数据库服务 ============
+  db:
+    image: mysql:9.7.2          
+    container_name: task_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3307:3306"             # 宿主机3307 → 容器3306，避免与本地MySQL冲突
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ============ API 服务 ============
+  api:
+    build: .
+    container_name: task_api
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                    # 加载项目根目录的 .env 文件
+    environment:
+      # 覆盖 DATABASE_URL，使用服务名 db 作为主机名
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE}
+    depends_on:
+      db:
+        condition: service_healthy   # 关键：等待 db 健康检查通过才启动
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+# ============ 持久化卷 ============
+volumes:
+  mysql_data:

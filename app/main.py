@@ -10,7 +10,6 @@ import logging
 import time
 from app.logging_config import setup_logging
 
-Base.metadata.create_all(bind=engine)
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -22,6 +21,9 @@ app = FastAPI(
 
 app.include_router(tasks_router)
 app.include_router(users_router)
+@app.get("/health", tags=["system"])
+def health_check():
+    return {"status": "ok"}
 
 
 @app.exception_handler(AppException)
