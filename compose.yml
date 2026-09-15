@@ -1,7 +1,7 @@
 services:
   # ============ 数据库服务 ============
   db:
-    image: mysql:9.7.2          
+    image: mysql:9.7.2
     container_name: task_db
     restart: always
     environment:
@@ -27,11 +27,12 @@ services:
     restart: always
     ports:
       - "8000:8000"
-    env_file:
-      - .env                    # 加载项目根目录的 .env 文件
     environment:
-      # 覆盖 DATABASE_URL，使用服务名 db 作为主机名
+      # Compose 从根目录 .env 插值；这里只向 API 注入运行必需变量
       DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE}
+      SECRET_KEY: ${SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
     depends_on:
       db:
         condition: service_healthy   # 关键：等待 db 健康检查通过才启动
