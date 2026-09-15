@@ -1,25 +1,115 @@
-import pytest, os
+import os
+import re
+import warnings
+
+import pytest
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import sessionmaker
-
-import app.models  # 确保所有 ORM 模型注册到 Base.metadata
-from app.database import Base, get_db
-from app.main import app
 
 load_dotenv()
 
+DATABASE_URL = os.getenv("DATABASE_URL")
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+TEST_DATABASE_RESET_ALLOWED = os.getenv("TEST_DATABASE_RESET_ALLOWED")
 
-# 防止配置错误后误删开发数据库
-if make_url(TEST_DATABASE_URL).database != "task_management_test_db":
-    raise RuntimeError("Tests must use task_management_test_db")
+TEST_DATABASE_NAME_PATTERN = re.compile(r"^[a-z0-9_]+_test_db$")
+PROTECTED_DATABASE_NAMES = frozenset({
+    "mysql",
+    "information_schema",
+    "performance_schema",
+    "sys",
+    "task_management",
+    "task_management_db",
+    "development",
+    "production",
+    "staging",
+})
 
+
+def _parse_database_url(value: str | None, setting_name: str):
+    if not value:
+        raise RuntimeError(f"{setting_name} must be configured before tests run")
+
+    try:
+        return make_url(value)
+    except (ArgumentError, ValueError):
+        raise RuntimeError(
+            f"{setting_name} must be a valid SQLAlchemy database URL"
+        ) from None
+
+
+def _validate_test_database_config(
+    database_url: str | None,
+    test_database_url: str | None,
+    reset_allowed: str | None,
+):
+    development_url = _parse_database_url(database_url, "DATABASE_URL")
+    test_url = _parse_database_url(test_database_url, "TEST_DATABASE_URL")
+
+    if not test_url.drivername.startswith("mysql"):
+        raise RuntimeError("TEST_DATABASE_URL must use a MySQL driver")
+
+    development_name = (development_url.database or "").casefold()
+    raw_test_name = test_url.database or ""
+    test_name = raw_test_name.casefold()
+
+    if test_url == development_url:
+        raise RuntimeError("TEST_DATABASE_URL must differ from DATABASE_URL")
+
+    if test_name == development_name:
+        raise RuntimeError(
+            "TEST_DATABASE_URL must not use the development database name"
+        )
+
+    if test_name in PROTECTED_DATABASE_NAMES:
+        raise RuntimeError("TEST_DATABASE_URL points to a protected database name")
+
+    if (
+        raw_test_name != test_name
+        or not TEST_DATABASE_NAME_PATTERN.fullmatch(test_name)
+    ):
+        raise RuntimeError(
+            "TEST_DATABASE_URL database name must end with '_test_db' "
+            "and contain only lowercase letters, numbers, and underscores"
+        )
+
+    if (reset_allowed or "").strip().casefold() != "true":
+        raise RuntimeError(
+            "TEST_DATABASE_RESET_ALLOWED must be 'true' to confirm that the "
+            "test database is disposable"
+        )
+
+    return test_url
+
+
+def _assert_test_database_is_safe():
+    return _validate_test_database_config(
+        database_url=DATABASE_URL,
+        test_database_url=TEST_DATABASE_URL,
+        reset_allowed=TEST_DATABASE_RESET_ALLOWED,
+    )
+
+
+validated_test_url = _assert_test_database_is_safe()
+
+if (validated_test_url.username or "").casefold() == "root":
+    warnings.warn(
+        "TEST_DATABASE_URL uses the MySQL root account; replace it with a "
+        "dedicated least-privilege test account",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+import app.models  # noqa: E402  # Ensure every ORM model is in Base.metadata.
+from app.database import Base, get_db  # noqa: E402
+from app.main import app  # noqa: E402
 
 test_engine = create_engine(
-    TEST_DATABASE_URL,
+    validated_test_url,
     echo=False
 )
 
@@ -32,7 +122,9 @@ TestingSessionLocal = sessionmaker(
 
 @pytest.fixture()
 def db_session():
-    # 每个测试开始前重建空表
+    # Revalidate immediately before every destructive schema operation.
+    if test_engine.url != _assert_test_database_is_safe():
+        raise RuntimeError("The validated test database no longer matches the engine")
     Base.metadata.drop_all(bind=test_engine)
     Base.metadata.create_all(bind=test_engine)
 
@@ -43,7 +135,10 @@ def db_session():
     finally:
         db.close()
 
-        # 每个测试结束后删除测试表
+        if test_engine.url != _assert_test_database_is_safe():
+            raise RuntimeError(
+                "The validated test database no longer matches the engine"
+            )
         Base.metadata.drop_all(bind=test_engine)
 
 
