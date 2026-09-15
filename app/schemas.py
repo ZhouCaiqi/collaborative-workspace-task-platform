@@ -1,4 +1,9 @@
+from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.enums import MemberRole
 
 
 class TaskCreate(BaseModel):
@@ -70,3 +75,75 @@ class UserResponse(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
+
+
+class WorkspaceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class WorkspaceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    created_by_id: int
+    created_at: datetime
+    updated_at: datetime
+    current_role: MemberRole
+
+
+class WorkspaceListResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[WorkspaceResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+AssignableMemberRole = Literal[MemberRole.ADMIN, MemberRole.MEMBER]
+
+
+class WorkspaceMemberCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(
+        min_length=3,
+        max_length=50,
+        pattern=r"^[A-Za-z0-9_]+$",
+    )
+    role: AssignableMemberRole = MemberRole.MEMBER
+
+
+class WorkspaceMemberRoleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: AssignableMemberRole
+
+
+class WorkspaceMemberResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: int
+    username: str
+    role: MemberRole
+    joined_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceMemberListResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[WorkspaceMemberResponse]
+    total: int
+    limit: int
+    offset: int

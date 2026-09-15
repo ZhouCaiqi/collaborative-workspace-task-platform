@@ -1,12 +1,21 @@
+from dataclasses import dataclass
+from typing import Callable
+
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User
+from app.enums import MemberRole
+from app.exceptions import (
+    InvalidTokenError,
+    WorkspaceNotFoundError,
+    WorkspacePermissionDeniedError,
+)
+from app.models import User, Workspace, WorkspaceMember
 from app.security import decode_access_token
 from app.services import user_service
-from app.exceptions import InvalidTokenError
 
 import logging
 
@@ -53,3 +62,52 @@ def get_current_user(
         )
 
     return user
+
+
+@dataclass(frozen=True)
+class WorkspaceAccess:
+    workspace: Workspace
+    membership: WorkspaceMember
+    current_user: User
+
+
+def get_workspace_access(
+    workspace_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WorkspaceAccess:
+    statement = (
+        select(Workspace, WorkspaceMember)
+        .join(
+            WorkspaceMember,
+            WorkspaceMember.workspace_id == Workspace.id,
+        )
+        .where(
+            Workspace.id == workspace_id,
+            WorkspaceMember.user_id == current_user.id,
+        )
+    )
+    row = db.execute(statement).one_or_none()
+
+    if row is None:
+        raise WorkspaceNotFoundError()
+
+    workspace, membership = row
+    return WorkspaceAccess(
+        workspace=workspace,
+        membership=membership,
+        current_user=current_user,
+    )
+
+
+def require_workspace_roles(
+    *allowed_roles: MemberRole,
+) -> Callable[..., WorkspaceAccess]:
+    def dependency(
+        access: WorkspaceAccess = Depends(get_workspace_access),
+    ) -> WorkspaceAccess:
+        if access.membership.role not in allowed_roles:
+            raise WorkspacePermissionDeniedError()
+        return access
+
+    return dependency

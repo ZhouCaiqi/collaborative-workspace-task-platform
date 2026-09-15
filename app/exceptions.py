@@ -48,3 +48,57 @@ class InvalidTokenError(AppException):
             message="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"}
         )
+
+
+class WorkspaceNotFoundError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=404,
+            code="WORKSPACE_NOT_FOUND",
+            message="Workspace not found",
+        )
+
+
+class WorkspacePermissionDeniedError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=403,
+            code="WORKSPACE_PERMISSION_DENIED",
+            message="Insufficient workspace permissions",
+        )
+
+
+class UserNotFoundError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=404,
+            code="USER_NOT_FOUND",
+            message="User not found",
+        )
+
+
+class WorkspaceMemberNotFoundError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=404,
+            code="WORKSPACE_MEMBER_NOT_FOUND",
+            message="Workspace member not found",
+        )
+
+
+class WorkspaceMemberAlreadyExistsError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=409,
+            code="WORKSPACE_MEMBER_ALREADY_EXISTS",
+            message="User is already a workspace member",
+        )
+
+
+class OwnerMembershipConflictError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=409,
+            code="OWNER_MEMBERSHIP_CONFLICT",
+            message="Workspace owner membership cannot be changed or removed",
+        )

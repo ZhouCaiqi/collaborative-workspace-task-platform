@@ -3,6 +3,8 @@ from fastapi.responses import JSONResponse
 
 from app.routers.users import router as users_router
 from app.routers.tasks import router as tasks_router
+from app.routers.workspace_members import router as workspace_members_router
+from app.routers.workspaces import router as workspaces_router
 from app.database import Base, engine
 from app.models import Task, User
 from app.exceptions import AppException
@@ -21,6 +23,10 @@ app = FastAPI(
 
 app.include_router(tasks_router)
 app.include_router(users_router)
+app.include_router(workspaces_router)
+app.include_router(workspace_members_router)
+
+
 @app.get("/health", tags=["system"])
 def health_check():
     return {"status": "ok"}

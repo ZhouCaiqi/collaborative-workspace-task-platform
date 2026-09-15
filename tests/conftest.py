@@ -215,3 +215,54 @@ def second_auth_headers(client):
     return {
         "Authorization": f"Bearer {token}"
     }
+
+
+@pytest.fixture()
+def user_factory(client):
+    created_count = 0
+
+    def create_user(prefix="workspace_user"):
+        nonlocal created_count
+        created_count += 1
+        user_data = {
+            "username": f"{prefix}_{created_count}",
+            "password": "workspace_password_123",
+        }
+
+        register_response = client.post(
+            "/users/register",
+            json=user_data,
+        )
+        assert register_response.status_code == 201
+
+        login_response = client.post(
+            "/users/login",
+            data=user_data,
+        )
+        assert login_response.status_code == 200
+
+        return {
+            "id": register_response.json()["id"],
+            "username": user_data["username"],
+            "headers": {
+                "Authorization": (
+                    f"Bearer {login_response.json()['access_token']}"
+                )
+            },
+        }
+
+    return create_user
+
+
+@pytest.fixture()
+def workspace_factory(client):
+    def create_workspace(headers, name="Collaboration Workspace"):
+        response = client.post(
+            "/workspaces",
+            headers=headers,
+            json={"name": name},
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    return create_workspace
