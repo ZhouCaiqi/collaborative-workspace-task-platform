@@ -35,3 +35,22 @@ def can_remove_member(
     if actor_role == MemberRole.ADMIN:
         return target_role == MemberRole.MEMBER
     return False
+
+
+def can_edit_task(
+    actor_role: MemberRole,
+    actor_user_id: int,
+    task_creator_id: int,
+) -> bool:
+    return (
+        actor_role in {MemberRole.OWNER, MemberRole.ADMIN}
+        or actor_user_id == task_creator_id
+    )
+
+
+def can_delete_task(
+    actor_role: MemberRole,
+    actor_user_id: int,
+    task_creator_id: int,
+) -> bool:
+    return can_edit_task(actor_role, actor_user_id, task_creator_id)

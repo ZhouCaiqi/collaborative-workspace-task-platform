@@ -11,6 +11,7 @@ from conftest import _assert_test_database_is_safe, test_engine
 BASELINE_REVISION = "6c2f9a4d7e31"
 STRUCTURE_REVISION = "9f4c2a7b1d30"
 BACKFILL_REVISION = "c1e8d5a4b762"
+FINAL_REVISION = "d4b6e8f1a203"
 MAPPING_TABLE = "task_collaboration_user_workspace_map"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -335,6 +336,128 @@ def _assert_backfilled(seed: dict) -> list[dict]:
     return mappings
 
 
+def _assert_finalized(seed: dict) -> None:
+    inspector = sa.inspect(test_engine)
+    task_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("tasks")
+    }
+    assert set(task_columns) == {
+        "id",
+        "title",
+        "description",
+        "priority",
+        "workspace_id",
+        "creator_id",
+        "assignee_id",
+        "status",
+        "created_at",
+        "updated_at",
+    }
+    for column_name in (
+        "workspace_id",
+        "creator_id",
+        "status",
+        "created_at",
+        "updated_at",
+    ):
+        assert task_columns[column_name]["nullable"] is False
+    assert task_columns["assignee_id"]["nullable"] is True
+    assert "TODO" in str(task_columns["status"]["default"])
+    assert "utc_timestamp(6)" in str(
+        task_columns["created_at"]["default"]
+    ).casefold()
+    assert "utc_timestamp(6)" in str(
+        task_columns["updated_at"]["default"]
+    ).casefold()
+
+    checks = {
+        check["name"]: check["sqltext"]
+        for check in inspector.get_check_constraints("tasks")
+    }
+    assert {
+        "ck_tasks_title_length",
+        "ck_tasks_priority",
+        "ck_tasks_status",
+    } <= set(checks)
+
+    foreign_keys = {
+        foreign_key["name"]: foreign_key
+        for foreign_key in inspector.get_foreign_keys("tasks")
+    }
+    assert set(foreign_keys) == {
+        "fk_tasks_workspace_id_workspaces",
+        "fk_tasks_creator_id_users",
+        "fk_tasks_assignee_id_users",
+    }
+    assert all(
+        foreign_key["options"]["ondelete"] == "RESTRICT"
+        for foreign_key in foreign_keys.values()
+    )
+
+    indexes = {
+        index["name"]: tuple(index["column_names"])
+        for index in inspector.get_indexes("tasks")
+    }
+    assert indexes == {
+        "ix_tasks_workspace_id_id": ("workspace_id", "id"),
+        "ix_tasks_workspace_status_id": (
+            "workspace_id",
+            "status",
+            "id",
+        ),
+        "ix_tasks_workspace_assignee_id": (
+            "workspace_id",
+            "assignee_id",
+            "id",
+        ),
+        "ix_tasks_creator_id": ("creator_id",),
+        "ix_tasks_assignee_id": ("assignee_id",),
+    }
+    assert MAPPING_TABLE in inspector.get_table_names()
+
+    with test_engine.connect() as connection:
+        task_rows = connection.execute(
+            sa.text(
+                "SELECT id, workspace_id, creator_id, assignee_id, status, "
+                "created_at, updated_at FROM tasks ORDER BY id"
+            )
+        ).mappings().all()
+        assert [row["id"] for row in task_rows] == seed["task_ids"]
+        assert [row["creator_id"] for row in task_rows] == [
+            seed["user_ids"][0],
+            seed["user_ids"][0],
+            seed["user_ids"][1],
+        ]
+        assert [row["status"] for row in task_rows] == [
+            "TODO",
+            "DONE",
+            "TODO",
+        ]
+        assert all(row["workspace_id"] is not None for row in task_rows)
+        assert all(row["assignee_id"] is None for row in task_rows)
+        assert all(row["created_at"] is not None for row in task_rows)
+        assert all(row["updated_at"] is not None for row in task_rows)
+
+        existing_workspace = connection.execute(
+            sa.text(
+                "SELECT id, name, created_by_id, created_at, updated_at "
+                "FROM workspaces WHERE id = :workspace_id"
+            ),
+            {"workspace_id": seed["existing_workspace_id"]},
+        ).one()
+        existing_membership = connection.execute(
+            sa.text(
+                "SELECT workspace_id, user_id, role, joined_at, updated_at "
+                "FROM workspace_members "
+                "WHERE workspace_id = :workspace_id"
+            ),
+            {"workspace_id": seed["existing_workspace_id"]},
+        ).one()
+        assert tuple(existing_workspace) == seed["existing_workspace"]
+        assert tuple(existing_membership) == seed["existing_membership"]
+
+
 def test_task_collaboration_migrations_round_trip_and_repeat(
     migration_config,
 ):
@@ -348,7 +471,46 @@ def test_task_collaboration_migrations_round_trip_and_repeat(
     command.upgrade(migration_config, BACKFILL_REVISION)
     _assert_revision(BACKFILL_REVISION)
     first_mappings = _assert_backfilled(seed)
+
+    command.upgrade(migration_config, FINAL_REVISION)
+    _assert_revision(FINAL_REVISION)
+    _assert_finalized(seed)
     command.check(migration_config)
+
+    with test_engine.begin() as connection:
+        connection.execute(
+            sa.text("UPDATE tasks SET status = 'IN_PROGRESS' WHERE id = :id"),
+            {"id": seed["task_ids"][0]},
+        )
+
+    command.downgrade(migration_config, BACKFILL_REVISION)
+    _assert_revision(BACKFILL_REVISION)
+    with test_engine.connect() as connection:
+        downgraded_rows = connection.execute(
+            sa.text(
+                "SELECT id, owner_id, completed, status "
+                "FROM tasks ORDER BY id"
+            )
+        ).mappings().all()
+        assert [row["owner_id"] for row in downgraded_rows] == [
+            seed["user_ids"][0],
+            seed["user_ids"][0],
+            seed["user_ids"][1],
+        ]
+        assert [row["completed"] for row in downgraded_rows] == [
+            False,
+            True,
+            False,
+        ]
+        assert downgraded_rows[0]["status"] == "IN_PROGRESS"
+
+    # Revision 2's stricter downgrade guard expects its original TODO mapping.
+    with test_engine.begin() as connection:
+        connection.execute(
+            sa.text("UPDATE tasks SET status = 'TODO' WHERE id = :id"),
+            {"id": seed["task_ids"][0]},
+        )
+    _assert_backfilled(seed)
 
     command.downgrade(migration_config, STRUCTURE_REVISION)
     _assert_revision(STRUCTURE_REVISION)
@@ -416,11 +578,44 @@ def test_task_collaboration_migrations_round_trip_and_repeat(
         "description",
     }
 
-    command.upgrade(migration_config, BACKFILL_REVISION)
-    _assert_revision(BACKFILL_REVISION)
-    _assert_structure_revision()
-    _assert_backfilled(seed)
+    command.upgrade(migration_config, FINAL_REVISION)
+    _assert_revision(FINAL_REVISION)
+    _assert_finalized(seed)
     command.check(migration_config)
+
+
+def test_final_revision_validation_stops_before_ddl(migration_config):
+    command.upgrade(migration_config, BASELINE_REVISION)
+    seed = _seed_legacy_database()
+    command.upgrade(migration_config, BACKFILL_REVISION)
+
+    with test_engine.begin() as connection:
+        connection.execute(
+            sa.text("UPDATE tasks SET priority = 0 WHERE id = :id"),
+            {"id": seed["task_ids"][0]},
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="does not satisfy final constraints",
+    ):
+        command.upgrade(migration_config, FINAL_REVISION)
+
+    _assert_revision(BACKFILL_REVISION)
+    inspector = sa.inspect(test_engine)
+    task_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("tasks")
+    }
+    assert "owner_id" in task_columns
+    assert "completed" in task_columns
+    assert task_columns["workspace_id"]["nullable"] is True
+    check_names = {
+        check["name"]
+        for check in inspector.get_check_constraints("tasks")
+    }
+    assert "ck_tasks_title_length" not in check_names
+    assert "ck_tasks_priority" not in check_names
 
 
 def test_backfill_downgrade_rejects_changed_generated_workspace_atomically(

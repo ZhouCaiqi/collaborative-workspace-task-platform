@@ -10,10 +10,11 @@ from app.database import get_db
 from app.enums import MemberRole
 from app.exceptions import (
     InvalidTokenError,
+    TaskNotFoundError,
     WorkspaceNotFoundError,
     WorkspacePermissionDeniedError,
 )
-from app.models import User, Workspace, WorkspaceMember
+from app.models import Task, User, Workspace, WorkspaceMember
 from app.security import decode_access_token
 from app.services import user_service
 
@@ -71,6 +72,12 @@ class WorkspaceAccess:
     current_user: User
 
 
+@dataclass(frozen=True)
+class WorkspaceTaskAccess:
+    workspace_access: WorkspaceAccess
+    task: Task
+
+
 def get_workspace_access(
     workspace_id: int,
     current_user: User = Depends(get_current_user),
@@ -97,6 +104,27 @@ def get_workspace_access(
         workspace=workspace,
         membership=membership,
         current_user=current_user,
+    )
+
+
+def get_workspace_task_access(
+    workspace_id: int,
+    task_id: int,
+    access: WorkspaceAccess = Depends(get_workspace_access),
+    db: Session = Depends(get_db),
+) -> WorkspaceTaskAccess:
+    task = db.scalar(
+        select(Task).where(
+            Task.id == task_id,
+            Task.workspace_id == workspace_id,
+        )
+    )
+    if task is None:
+        raise TaskNotFoundError()
+
+    return WorkspaceTaskAccess(
+        workspace_access=access,
+        task=task,
     )
 
 

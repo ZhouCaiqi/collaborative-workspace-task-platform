@@ -21,6 +21,15 @@ class TaskNotFoundError(AppException):
         )
 
 
+class TaskPermissionDeniedError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=403,
+            code="TASK_PERMISSION_DENIED",
+            message="Insufficient task permissions",
+        )
+
+
 class UsernameAlreadyExistsError(AppException):
     def __init__(self):
         super().__init__(

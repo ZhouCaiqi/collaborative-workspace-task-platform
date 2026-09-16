@@ -5,10 +5,11 @@ import warnings
 import pytest
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
@@ -94,6 +95,17 @@ def _assert_test_database_is_safe():
     )
 
 
+def pytest_collection_modifyitems(items):
+    # Alembic round-trip tests perform repeated MySQL DDL on the shared,
+    # disposable test schema. Run them after ORM/API tests so InnoDB metadata
+    # churn cannot influence constraints created later by Base.metadata.
+    items.sort(
+        key=lambda item: (
+            item.path.name == "test_task_collaboration_migrations.py"
+        )
+    )
+
+
 validated_test_url = _assert_test_database_is_safe()
 
 if (validated_test_url.username or "").casefold() == "root":
@@ -110,8 +122,26 @@ from app.main import app  # noqa: E402
 
 test_engine = create_engine(
     validated_test_url,
-    echo=False
+    echo=False,
+    poolclass=NullPool,
 )
+
+
+@event.listens_for(test_engine, "checkout")
+def _enable_mysql_foreign_key_checks(
+    dbapi_connection,
+    _connection_record,
+    _connection_proxy,
+):
+    # A Session can return its connection after commit and later check out a
+    # different pooled connection. Enforce constraints on every checkout so
+    # destructive migration/metadata tests cannot leak session state.
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET SESSION FOREIGN_KEY_CHECKS = 1")
+    finally:
+        cursor.close()
+
 
 TestingSessionLocal = sessionmaker(
     bind=test_engine,
@@ -125,11 +155,12 @@ def db_session():
     # Revalidate immediately before every destructive schema operation.
     if test_engine.url != _assert_test_database_is_safe():
         raise RuntimeError("The validated test database no longer matches the engine")
+    test_engine.dispose()
     Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
     Base.metadata.create_all(bind=test_engine)
 
     db = TestingSessionLocal()
-
     try:
         yield db
     finally:
@@ -139,7 +170,9 @@ def db_session():
             raise RuntimeError(
                 "The validated test database no longer matches the engine"
             )
+        test_engine.dispose()
         Base.metadata.drop_all(bind=test_engine)
+        test_engine.dispose()
 
 
 @pytest.fixture()

@@ -1,100 +1,88 @@
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskListResponse
-from app.services import task_service
+from typing import Annotated
 
-from app.dependencies import get_current_user
-from app.models import User
-from typing import Literal
+from fastapi import APIRouter, Depends, Query, Response, status
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.dependencies import (
+    WorkspaceAccess,
+    WorkspaceTaskAccess,
+    get_workspace_access,
+    get_workspace_task_access,
+)
+from app.schemas import (
+    TaskCreate,
+    TaskListQuery,
+    TaskListResponse,
+    TaskResponse,
+    TaskUpdate,
+)
+from app.services import task_service
 
 
 router = APIRouter(
-    prefix="/tasks",
-    tags=["tasks"]
+    prefix="/workspaces/{workspace_id}/tasks",
+    tags=["tasks"],
 )
 
 
-@router.get("/", response_model=TaskListResponse)
-def get_tasks(
-    completed: bool | None = None,
-    limit: int = Query(default=10, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    priority: int | None = Query(default=None, ge=1, le=5),
-    sort_by: Literal["id", "priority", "title"] = "id",
-    sort_order: Literal["asc", "desc"] = "desc",
+@router.get("", response_model=TaskListResponse)
+def list_tasks(
+    query: Annotated[TaskListQuery, Query()],
+    access: WorkspaceAccess = Depends(get_workspace_access),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
 ):
-    items, total = task_service.get_tasks(
+    return task_service.list_tasks(
         db=db,
-        completed=completed,
-        limit=limit,
-        offset=offset,
-        priority=priority,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        owner_id=current_user.id
+        access=access,
+        query=query,
     )
-    return {
-        "items": items,
-        "total": total,
-        "limit": limit,
-        "offset": offset
-    }
+
+
+@router.post(
+    "",
+    response_model=TaskResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_task(
+    data: TaskCreate,
+    access: WorkspaceAccess = Depends(get_workspace_access),
+    db: Session = Depends(get_db),
+):
+    return task_service.create_task(
+        db=db,
+        access=access,
+        data=data,
+    )
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
 def get_task(
-    task_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
 ):
-    task = task_service.get_task_by_id(
-        db=db,
-        task_id=task_id,
-        owner_id=current_user.id
-    )
-
-    return task
-
-
-@router.post("/", status_code=201, response_model=TaskResponse)
-def create_task(
-    task: TaskCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    return task_service.create_task(
-        db=db,
-        task=task,
-        owner_id=current_user.id
-    )
+    return task_service.get_task_data(access)
 
 
 @router.patch("/{task_id}", response_model=TaskResponse)
 def update_task(
-    task_id: int, 
-    task_update: TaskUpdate, 
+    data: TaskUpdate,
+    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
 ):
     return task_service.update_task(
         db=db,
-        task_id=task_id,
-        task_update=task_update,
-        owner_id=current_user.id
+        access=access,
+        data=data,
     )
 
 
-@router.delete("/{task_id}", status_code=204)
+@router.delete(
+    "/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def delete_task(
-    task_id: int,
+    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
 ):
-    return task_service.delete_task(
-        db=db,
-        task_id=task_id,
-        owner_id=current_user.id
-    )
+    task_service.delete_task(db=db, access=access)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
