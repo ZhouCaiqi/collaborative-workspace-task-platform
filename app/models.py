@@ -13,7 +13,7 @@ from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
-from app.enums import MemberRole
+from app.enums import MemberRole, TaskStatus
 
 
 def utc_now() -> datetime:
@@ -41,7 +41,18 @@ class User(Base):
     )
 
     tasks: Mapped[list["Task"]] = relationship(
-        back_populates="owner"
+        back_populates="owner",
+        foreign_keys="Task.owner_id",
+    )
+
+    created_tasks: Mapped[list["Task"]] = relationship(
+        back_populates="creator",
+        foreign_keys="Task.creator_id",
+    )
+
+    assigned_tasks: Mapped[list["Task"]] = relationship(
+        back_populates="assignee",
+        foreign_keys="Task.assignee_id",
     )
 
     memberships: Mapped[list["WorkspaceMember"]] = relationship(
@@ -55,6 +66,27 @@ class User(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('TODO', 'IN_PROGRESS', 'DONE')",
+            name="ck_tasks_status",
+        ),
+        Index("ix_tasks_workspace_id_id", "workspace_id", "id"),
+        Index(
+            "ix_tasks_workspace_status_id",
+            "workspace_id",
+            "status",
+            "id",
+        ),
+        Index(
+            "ix_tasks_workspace_assignee_id",
+            "workspace_id",
+            "assignee_id",
+            "id",
+        ),
+        Index("ix_tasks_creator_id", "creator_id"),
+        Index("ix_tasks_assignee_id", "assignee_id"),
+    )
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
@@ -78,17 +110,74 @@ class Task(Base):
     )
 
     owner_id: Mapped[int] = mapped_column(
-    ForeignKey("users.id"),
-    nullable=False
+        ForeignKey("users.id"),
+        nullable=False,
     )
 
     owner: Mapped[User] = relationship(
-    back_populates="tasks"
+        back_populates="tasks",
+        foreign_keys=[owner_id],
     )
 
     description: Mapped[str | None] = mapped_column(
         String(500),
         nullable=True
+    )
+
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    creator_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    assignee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+    status: Mapped[TaskStatus | None] = mapped_column(
+        SQLAlchemyEnum(
+            TaskStatus,
+            name="task_status",
+            native_enum=False,
+            create_constraint=False,
+            validate_strings=True,
+            length=16,
+        ),
+        default=TaskStatus.TODO,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6),
+        default=utc_now,
+        nullable=True,
+    )
+
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DATETIME(fsp=6),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=True,
+    )
+
+    workspace: Mapped["Workspace | None"] = relationship(
+        back_populates="tasks",
+        foreign_keys=[workspace_id],
+    )
+
+    creator: Mapped[User | None] = relationship(
+        back_populates="created_tasks",
+        foreign_keys=[creator_id],
+    )
+
+    assignee: Mapped[User | None] = relationship(
+        back_populates="assigned_tasks",
+        foreign_keys=[assignee_id],
     )
 
 
@@ -139,6 +228,11 @@ class Workspace(Base):
 
     memberships: Mapped[list["WorkspaceMember"]] = relationship(
         back_populates="workspace"
+    )
+
+    tasks: Mapped[list[Task]] = relationship(
+        back_populates="workspace",
+        foreign_keys="Task.workspace_id",
     )
 
 

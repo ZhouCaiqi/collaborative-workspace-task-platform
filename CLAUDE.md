@@ -6,7 +6,7 @@ This file provides guidance to Claude Code and other coding assistants working i
 
 This is a Python 3.13 task-management REST API built with FastAPI, Pydantic 2, SQLAlchemy 2, MySQL through PyMySQL, Alembic, Argon2 password hashing, and HS256 JWT bearer authentication.
 
-The repository is initialized with Git. Workspace collaboration now includes workspaces, memberships, and fixed `OWNER`/`ADMIN`/`MEMBER` role checks. Tasks still use the original per-user `owner_id`/`completed` model and flat `/tasks` routes; workspace task assignment, collaborative task status, comments, and activity logs are not implemented yet.
+The repository is initialized with Git. Workspace collaboration includes workspaces, memberships, and fixed `OWNER`/`ADMIN`/`MEMBER` role checks. The codebase is currently in the Task collaboration 2B compatibility stage: `Task` keeps legacy `owner_id`/`completed` while nullable workspace, creator, assignee, status, and timestamp fields coexist for migration. The public API still uses the original flat `/tasks` routes and legacy schemas/services; nested workspace Task APIs and Task permissions are deferred to 2C.
 
 ## Environment
 
@@ -89,8 +89,9 @@ Important safety behavior:
 - Never point `TEST_DATABASE_URL` at a development, staging, or production database, even if its name matches the guard.
 - A root test account currently triggers a warning and remains technical debt; do not create or remove MySQL users without explicit authorization.
 - Tests currently create tables from ORM metadata rather than by running Alembic, so passing tests do not prove migration correctness.
+- `tests/test_task_collaboration_migrations.py` separately exercises the 2B Alembic upgrade/check/downgrade path. It must run only against the same validated disposable MySQL test database and requires a non-root account.
 
-`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 70 tests covering the original user/task behavior plus workspace creation, membership permissions, transaction rollback, and database constraints. There is no configured formatter, linter, type checker, or CI workflow.
+`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 79 tests and reported 92.16% coverage, including the original user/task behavior, workspace/membership behavior, 2B ORM configuration, Alembic filtering, migration round trips, and unsafe-downgrade protection. There is no configured formatter, linter, type checker, or CI workflow.
 
 ## Architecture
 
@@ -105,8 +106,8 @@ The production request path follows router → dependency/service → SQLAlchemy
 - `app/services/task_service.py` handles task queries and writes. Every current task operation scopes by `owner_id` for per-user isolation.
 - `app/services/workspace_service.py` owns the workspace use cases. Workspace creation inserts the workspace and its one `OWNER` membership in a single transaction.
 - `app/services/workspace_member_service.py` owns member list/add/update/remove use cases and their transaction boundaries.
-- `app/models.py` defines `User`, the unchanged `Task`, `Workspace`, and `WorkspaceMember`. Membership uses a composite `(workspace_id, user_id)` primary key.
-- `app/enums.py` defines the shared string `MemberRole`; SQLAlchemy persists it as constrained `VARCHAR`, not MySQL native `ENUM`.
+- `app/models.py` defines `User`, the 2B-compatible `Task`, `Workspace`, and `WorkspaceMember`. Task temporarily has three explicit User relationships (`owner`, `creator`, and `assignee`) plus its Workspace relationship; legacy and new columns coexist. Membership uses a composite `(workspace_id, user_id)` primary key.
+- `app/enums.py` defines shared string enums `MemberRole` and `TaskStatus`; SQLAlchemy persists them as constrained `VARCHAR`, not MySQL native `ENUM`.
 - `app/schemas.py` defines Pydantic request/response models. Workspace write schemas forbid extra fields and client-supplied `OWNER`; existing task schemas remain unchanged.
 - `app/database.py` owns the engine, declarative base, session factory, and request-scoped `get_db()` dependency.
 - `app/security.py` uses pwdlib's recommended password hash and creates 30-minute-by-default HS256 access tokens whose `sub` is currently the username.
@@ -119,14 +120,15 @@ The `/health` endpoint currently reports only process liveness and does not chec
 
 ## Database and transaction behavior
 
-- Schema changes are managed by Alembic. The current linear history creates users/tasks, adds task descriptions, creates `workspaces`, and then creates `workspace_members`. Current head is `6c2f9a4d7e31`.
+- Schema changes are managed by Alembic. Repository head `c1e8d5a4b762` follows `9f4c2a7b1d30`: Revision 1 adds nullable Task collaboration fields, foreign keys, constraints, indexes, and a migration-only mapping table; Revision 2 creates personal Workspaces and OWNER memberships and backfills legacy Tasks. These 2B revisions have not been applied to the development database and must not be deployed as the final application state.
+- `task_collaboration_user_workspace_map` is temporary migration infrastructure, not a business ORM model. `alembic/env.py` excludes only this table from autogenerate comparison. When a later migration removes the table, remove the matching exclusion rule as part of the same change.
 - `app.main` does not create tables on import.
 - `SessionLocal` uses `autoflush=False` and `expire_on_commit=False`; `get_db()` always closes the request session.
 - Routers and dependencies never commit. Each top-level write service owns one use-case transaction, commits once, and rolls back on SQLAlchemy failures.
 - Task ownership is enforced in service queries with both task ID and owner ID.
 - Workspace access first proves database membership. Missing workspaces and non-members both receive `WORKSPACE_NOT_FOUND`; authenticated members with insufficient roles receive `WORKSPACE_PERMISSION_DENIED`.
 - `Workspace.created_by_id` records immutable provenance at the API boundary, while current authority comes from `WorkspaceMember.role`.
-- Task collaboration remains a later migration; do not infer workspace authorization for the unchanged `/tasks` routes.
+- The new nullable Task fields are compatibility data only in 2B. Do not infer workspace authorization for the unchanged `/tasks` routes or change their request/response shape. 2C will make the new fields final, remove `owner_id`/`completed`, and switch to nested workspace Task APIs.
 
 When changing models, create and review an Alembic migration. Do not rely on `create_all()` to update an existing database. MySQL DDL is not transactional, so split risky schema changes and data backfills into staged migrations.
 
