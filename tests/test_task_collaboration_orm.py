@@ -1,12 +1,15 @@
-import pytest
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 from sqlalchemy import Enum as SQLAlchemyEnum
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import inspect
 from sqlalchemy.dialects.mysql import DATETIME
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import configure_mappers
 
-from app.enums import MemberRole, TaskStatus
-from app.models import Task, User, Workspace, WorkspaceMember
+from app.enums import TaskStatus
+from app.models import Task, User, Workspace
 
 
 def test_task_status_is_a_shared_string_enum():
@@ -33,6 +36,8 @@ def test_final_task_columns_constraints_and_indexes():
         "updated_at",
     }
     for column_name in (
+        "title",
+        "priority",
         "workspace_id",
         "creator_id",
         "status",
@@ -60,6 +65,23 @@ def test_final_task_columns_constraints_and_indexes():
         "ck_tasks_priority",
         "ck_tasks_status",
     } <= checks
+
+    foreign_keys = {
+        foreign_key.parent.name: foreign_key
+        for foreign_key in table.foreign_keys
+    }
+    assert {
+        column_name: (
+            foreign_key.column.table.name,
+            foreign_key.column.name,
+            foreign_key.ondelete,
+        )
+        for column_name, foreign_key in foreign_keys.items()
+    } == {
+        "workspace_id": ("workspaces", "id", "RESTRICT"),
+        "creator_id": ("users", "id", "RESTRICT"),
+        "assignee_id": ("users", "id", "RESTRICT"),
+    }
 
     indexes = {
         index.name: tuple(column.name for column in index.columns)
@@ -112,85 +134,35 @@ def test_final_task_relationships_have_unambiguous_foreign_keys():
 
 
 def test_database_rejects_invalid_task_checks_and_foreign_keys(db_session):
-    user = User(
-        username="task_constraint_owner",
-        hashed_password="constraint-test-hash",
-    )
-    db_session.add(user)
-    db_session.flush()
-    workspace = Workspace(
-        name="Task constraint workspace",
-        created_by_id=user.id,
-    )
-    db_session.add(workspace)
-    db_session.flush()
-    db_session.add(
-        WorkspaceMember(
-            workspace_id=workspace.id,
-            user_id=user.id,
-            role=MemberRole.OWNER,
-        )
-    )
-    db_session.commit()
+    # This black-box integration probe isolates the confirmed pytest-cov and
+    # MySQL 9.7 SQL-layer FK interaction, including test-schema creation.
+    # App coverage stays in this process.
+    probe_path = Path(__file__).parent / "support" / "task_constraint_probe.py"
+    probe_environment = os.environ.copy()
+    for variable_name in tuple(probe_environment):
+        if (
+            variable_name == "COVERAGE_PROCESS_START"
+            or variable_name.startswith("COV_CORE_")
+            or variable_name.startswith("COVERAGE_")
+        ):
+            probe_environment.pop(variable_name)
 
-    missing_workspace_id = (
-        db_session.scalar(select(func.max(Workspace.id))) or 0
-    ) + 1
-    missing_user_id = (
-        db_session.scalar(select(func.max(User.id))) or 0
-    ) + 1
-    assert db_session.get(Workspace, missing_workspace_id) is None
-    assert db_session.get(User, missing_user_id) is None
-    assert db_session.scalar(
-        text("SELECT @@SESSION.FOREIGN_KEY_CHECKS")
-    ) == 1
-
-    foreign_key_targets = dict(
-        db_session.execute(
-            text(
-                "SELECT COLUMN_NAME, REFERENCED_TABLE_NAME "
-                "FROM information_schema.KEY_COLUMN_USAGE "
-                "WHERE TABLE_SCHEMA = DATABASE() "
-                "AND TABLE_NAME = 'tasks' "
-                "AND REFERENCED_TABLE_NAME IS NOT NULL"
-            )
-        ).all()
-    )
-    assert foreign_key_targets == {
-        "workspace_id": "workspaces",
-        "creator_id": "users",
-        "assignee_id": "users",
-    }
-
-    base_values = {
-        "title": "Constraint task",
-        "priority": 1,
-        "workspace_id": workspace.id,
-        "creator_id": user.id,
-        "assignee_id": None,
-        "status": "TODO",
-    }
-    invalid_overrides = (
-        {"workspace_id": missing_workspace_id},
-        {"creator_id": missing_user_id},
-        {"assignee_id": missing_user_id},
-        {"title": "   "},
-        {"priority": 0},
-        {"status": "INVALID"},
-    )
-    insert_statement = text(
-        "INSERT INTO tasks "
-        "(title, priority, workspace_id, creator_id, assignee_id, status) "
-        "VALUES (:title, :priority, :workspace_id, :creator_id, "
-        ":assignee_id, :status)"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(probe_path),
+        ],
+        cwd=Path(__file__).parents[1],
+        env=probe_environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
 
-    for overrides in invalid_overrides:
-        values = base_values | overrides
-        assert db_session.scalar(
-            text("SELECT @@SESSION.FOREIGN_KEY_CHECKS")
-        ) == 1
-        with pytest.raises(DBAPIError):
-            db_session.execute(insert_statement, values)
-            db_session.commit()
-        db_session.rollback()
+    assert result.returncode == 0, (
+        f"task constraint probe exited with {result.returncode}: "
+        f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+    )
+    assert result.stdout.strip() == "TASK_CONSTRAINT_PROBE_OK"
+    assert result.stderr == ""

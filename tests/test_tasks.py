@@ -655,12 +655,12 @@ def test_database_rejects_null_required_task_fields(
     db_session.rollback()
 
 
-def test_openapi_contains_only_nested_task_crud(client):
+def test_openapi_contains_nested_task_crud_and_workflow_routes(client):
     schema = client.get("/openapi.json").json()
     paths = schema["paths"]
     assert "/tasks/" not in paths
     assert "/tasks/{task_id}" not in paths
     assert "/workspaces/{workspace_id}/tasks" in paths
     assert "/workspaces/{workspace_id}/tasks/{task_id}" in paths
-    assert "/workspaces/{workspace_id}/tasks/{task_id}/status" not in paths
-    assert "/workspaces/{workspace_id}/tasks/{task_id}/assignee" not in paths
+    assert "/workspaces/{workspace_id}/tasks/{task_id}/status" in paths
+    assert "/workspaces/{workspace_id}/tasks/{task_id}/assignee" in paths

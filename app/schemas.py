@@ -67,6 +67,18 @@ class TaskUpdate(BaseModel):
         return self
 
 
+class TaskStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: TaskStatus
+
+
+class TaskAssigneeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assignee_id: int | None = Field(gt=0)
+
+
 class TaskResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

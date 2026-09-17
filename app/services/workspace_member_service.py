@@ -1,17 +1,18 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.dependencies import WorkspaceAccess
-from app.enums import MemberRole
+from app.enums import MemberRole, TaskStatus
 from app.exceptions import (
+    AppException,
     OwnerMembershipConflictError,
     UserNotFoundError,
     WorkspaceMemberAlreadyExistsError,
     WorkspaceMemberNotFoundError,
     WorkspacePermissionDeniedError,
 )
-from app.models import User, WorkspaceMember
+from app.models import Task, User, WorkspaceMember, utc_now
 from app.policies import (
     can_add_member,
     can_remove_member,
@@ -56,6 +57,22 @@ def _get_member_with_username(
 
     membership, username = row
     return membership, username
+
+
+def _lock_workspace_member(
+    db: Session,
+    workspace_id: int,
+    user_id: int,
+) -> WorkspaceMember | None:
+    return db.scalar(
+        select(WorkspaceMember)
+        .where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 def list_members(
@@ -177,11 +194,13 @@ def remove_member(
     user_id: int,
 ) -> None:
     try:
-        membership, _ = _get_member_with_username(
+        membership = _lock_workspace_member(
             db,
             access.workspace.id,
             user_id,
         )
+        if membership is None:
+            raise WorkspaceMemberNotFoundError()
 
         if membership.role == MemberRole.OWNER:
             if access.membership.role == MemberRole.OWNER:
@@ -194,8 +213,25 @@ def remove_member(
         ):
             raise WorkspacePermissionDeniedError()
 
+        db.execute(
+            update(Task)
+            .where(
+                Task.workspace_id == access.workspace.id,
+                Task.assignee_id == user_id,
+                Task.status != TaskStatus.DONE,
+            )
+            .values(
+                assignee_id=None,
+                updated_at=utc_now(),
+            )
+            .execution_options(synchronize_session=False)
+        )
         db.delete(membership)
+        db.flush()
         db.commit()
+    except AppException:
+        db.rollback()
+        raise
     except SQLAlchemyError:
         db.rollback()
         raise

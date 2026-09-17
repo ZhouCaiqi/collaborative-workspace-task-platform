@@ -1,10 +1,11 @@
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 
 from app.dependencies import WorkspaceAccess
-from app.enums import MemberRole
-from app.models import User, Workspace, WorkspaceMember
+from app.enums import MemberRole, TaskStatus
+from app.exceptions import OwnerMembershipConflictError
+from app.models import Task, User, Workspace, WorkspaceMember
 from app.services import workspace_member_service
 
 
@@ -501,3 +502,244 @@ def test_update_role_refresh_failure_preserves_original_role(
         (workspace["id"], target["id"]),
     )
     assert membership.role == MemberRole.MEMBER
+
+
+def test_remove_member_unassigns_only_unfinished_tasks_in_workspace(
+    client,
+    db_session,
+    workspace_roles,
+    workspace_factory,
+):
+    data = workspace_roles
+    workspace_id = data["workspace"]["id"]
+    target_id = data["member"]["id"]
+    other_workspace = workspace_factory(
+        data["owner"]["headers"],
+        "Other Member Removal Workspace",
+    )
+    assert _add_member(
+        client,
+        other_workspace["id"],
+        data["owner"],
+        data["member"],
+    ).status_code == 201
+
+    tasks = [
+        Task(
+            title="Target TODO",
+            workspace_id=workspace_id,
+            creator_id=target_id,
+            assignee_id=target_id,
+            status=TaskStatus.TODO,
+        ),
+        Task(
+            title="Target in progress",
+            workspace_id=workspace_id,
+            creator_id=data["owner"]["id"],
+            assignee_id=target_id,
+            status=TaskStatus.IN_PROGRESS,
+        ),
+        Task(
+            title="Target done",
+            workspace_id=workspace_id,
+            creator_id=data["owner"]["id"],
+            assignee_id=target_id,
+            status=TaskStatus.DONE,
+        ),
+        Task(
+            title="Other member task",
+            workspace_id=workspace_id,
+            creator_id=data["owner"]["id"],
+            assignee_id=data["admin"]["id"],
+            status=TaskStatus.TODO,
+        ),
+        Task(
+            title="Other workspace task",
+            workspace_id=other_workspace["id"],
+            creator_id=data["owner"]["id"],
+            assignee_id=target_id,
+            status=TaskStatus.TODO,
+        ),
+    ]
+    db_session.add_all(tasks)
+    db_session.commit()
+    task_ids = [task.id for task in tasks]
+
+    response = client.delete(
+        f"/workspaces/{workspace_id}/members/{target_id}",
+        headers=data["owner"]["headers"],
+    )
+    assert response.status_code == 204
+
+    persisted = {
+        task.id: task
+        for task in db_session.scalars(
+            select(Task)
+            .where(Task.id.in_(task_ids))
+            .execution_options(populate_existing=True)
+        )
+    }
+    assert persisted[task_ids[0]].assignee_id is None
+    assert persisted[task_ids[1]].assignee_id is None
+    assert persisted[task_ids[2]].assignee_id == target_id
+    assert persisted[task_ids[3]].assignee_id == data["admin"]["id"]
+    assert persisted[task_ids[4]].assignee_id == target_id
+    assert persisted[task_ids[0]].creator_id == target_id
+    assert db_session.get(
+        WorkspaceMember,
+        (workspace_id, target_id),
+    ) is None
+    assert db_session.get(
+        WorkspaceMember,
+        (other_workspace["id"], target_id),
+    ) is not None
+
+
+def test_remove_member_uses_one_bulk_update_flush_and_commit(
+    db_session,
+    workspace_roles,
+    monkeypatch,
+):
+    data = workspace_roles
+    workspace_id = data["workspace"]["id"]
+    target_id = data["member"]["id"]
+    task = Task(
+        title="Bulk cleanup task",
+        workspace_id=workspace_id,
+        creator_id=data["owner"]["id"],
+        assignee_id=target_id,
+        status=TaskStatus.TODO,
+    )
+    db_session.add(task)
+    db_session.commit()
+    access = _get_workspace_access(
+        db_session,
+        workspace_id,
+        data["owner"]["id"],
+    )
+    original_flush = db_session.flush
+    original_commit = db_session.commit
+    flush_count = 0
+    commit_count = 0
+    task_updates = []
+
+    def tracked_flush(*args, **kwargs):
+        nonlocal flush_count
+        flush_count += 1
+        return original_flush(*args, **kwargs)
+
+    def tracked_commit():
+        nonlocal commit_count
+        commit_count += 1
+        return original_commit()
+
+    def record_updates(_conn, _cursor, statement, *_args):
+        if statement.lstrip().upper().startswith("UPDATE TASKS"):
+            task_updates.append(statement)
+
+    monkeypatch.setattr(db_session, "flush", tracked_flush)
+    monkeypatch.setattr(db_session, "commit", tracked_commit)
+    event.listen(db_session.get_bind(), "before_cursor_execute", record_updates)
+    try:
+        workspace_member_service.remove_member(
+            db_session,
+            access,
+            target_id,
+        )
+    finally:
+        event.remove(
+            db_session.get_bind(),
+            "before_cursor_execute",
+            record_updates,
+        )
+
+    assert flush_count == 1
+    assert commit_count == 1
+    assert len(task_updates) == 1
+
+
+@pytest.mark.parametrize("failure_point", ["update", "flush", "commit"])
+def test_remove_member_failure_rolls_back_all_changes(
+    db_session,
+    workspace_roles,
+    monkeypatch,
+    failure_point,
+):
+    data = workspace_roles
+    workspace_id = data["workspace"]["id"]
+    target_id = data["member"]["id"]
+    task = Task(
+        title="Removal rollback task",
+        workspace_id=workspace_id,
+        creator_id=data["owner"]["id"],
+        assignee_id=target_id,
+        status=TaskStatus.IN_PROGRESS,
+    )
+    db_session.add(task)
+    db_session.commit()
+    task_id = task.id
+    access = _get_workspace_access(
+        db_session,
+        workspace_id,
+        data["owner"]["id"],
+    )
+
+    def fail(*_args, **_kwargs):
+        raise SQLAlchemyError(f"simulated {failure_point} failure")
+
+    if failure_point == "update":
+        original_execute = db_session.execute
+
+        def fail_bulk_update(statement, *args, **kwargs):
+            if getattr(statement, "is_update", False):
+                fail()
+            return original_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db_session, "execute", fail_bulk_update)
+    else:
+        monkeypatch.setattr(db_session, failure_point, fail)
+
+    with pytest.raises(SQLAlchemyError):
+        workspace_member_service.remove_member(
+            db_session,
+            access,
+            target_id,
+        )
+
+    assert not db_session.in_transaction()
+    membership = db_session.get(
+        WorkspaceMember,
+        (workspace_id, target_id),
+    )
+    persisted_task = db_session.scalar(
+        select(Task)
+        .where(Task.id == task_id)
+        .execution_options(populate_existing=True)
+    )
+    assert membership is not None
+    assert persisted_task.assignee_id == target_id
+
+
+def test_remove_member_domain_error_releases_locked_transaction(
+    db_session,
+    workspace_roles,
+):
+    data = workspace_roles
+    access = _get_workspace_access(
+        db_session,
+        data["workspace"]["id"],
+        data["owner"]["id"],
+    )
+
+    with pytest.raises(OwnerMembershipConflictError):
+        workspace_member_service.remove_member(
+            db_session,
+            access,
+            data["owner"]["id"],
+        )
+
+    assert not db_session.in_transaction()
+    assert db_session.get(
+        WorkspaceMember,
+        (data["workspace"]["id"], data["owner"]["id"]),
+    ) is not None

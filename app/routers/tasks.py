@@ -11,10 +11,12 @@ from app.dependencies import (
     get_workspace_task_access,
 )
 from app.schemas import (
+    TaskAssigneeUpdate,
     TaskCreate,
     TaskListQuery,
     TaskListResponse,
     TaskResponse,
+    TaskStatusUpdate,
     TaskUpdate,
 )
 from app.services import task_service
@@ -70,6 +72,32 @@ def update_task(
     db: Session = Depends(get_db),
 ):
     return task_service.update_task(
+        db=db,
+        access=access,
+        data=data,
+    )
+
+
+@router.patch("/{task_id}/status", response_model=TaskResponse)
+def update_task_status(
+    data: TaskStatusUpdate,
+    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
+    db: Session = Depends(get_db),
+):
+    return task_service.update_task_status(
+        db=db,
+        access=access,
+        data=data,
+    )
+
+
+@router.patch("/{task_id}/assignee", response_model=TaskResponse)
+def update_task_assignee(
+    data: TaskAssigneeUpdate,
+    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
+    db: Session = Depends(get_db),
+):
+    return task_service.update_task_assignee(
         db=db,
         access=access,
         data=data,

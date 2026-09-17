@@ -30,6 +30,24 @@ class TaskPermissionDeniedError(AppException):
         )
 
 
+class TaskStatusTransitionConflictError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=409,
+            code="TASK_STATUS_TRANSITION_CONFLICT",
+            message="Task status transition is not allowed",
+        )
+
+
+class TaskAssignmentConflictError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=409,
+            code="TASK_ASSIGNMENT_CONFLICT",
+            message="Task assignment change is not allowed",
+        )
+
+
 class UsernameAlreadyExistsError(AppException):
     def __init__(self):
         super().__init__(

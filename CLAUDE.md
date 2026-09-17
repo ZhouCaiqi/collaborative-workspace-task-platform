@@ -6,7 +6,7 @@ This file provides guidance to Claude Code and other coding assistants working i
 
 This is a Python 3.13 task-management REST API built with FastAPI, Pydantic 2, SQLAlchemy 2, MySQL through PyMySQL, Alembic, Argon2 password hashing, and HS256 JWT bearer authentication.
 
-The repository is initialized with Git. Workspace collaboration includes workspaces, memberships, fixed `OWNER`/`ADMIN`/`MEMBER` role checks, and the 2C-1 final Task model. Tasks are workspace-scoped and use creator, optional assignee, status, and timestamp fields; the legacy `owner_id`/`completed` model and flat `/tasks` routes have been removed from application code. Dedicated status and assignee operations remain deferred to 2C-2.
+The repository is initialized with Git. Workspace collaboration includes workspaces, memberships, fixed `OWNER`/`ADMIN`/`MEMBER` role checks, the final collaborative Task model, dedicated status and assignee workflows, member self-claim/release, and assignment cleanup when a member is removed. Tasks are workspace-scoped and use creator, optional assignee, status, and timestamp fields; the legacy `owner_id`/`completed` model and flat `/tasks` routes have been removed from application code.
 
 ## Environment
 
@@ -93,7 +93,7 @@ Important safety behavior:
 - The test engine uses `NullPool`, disposes connections around schema resets, and explicitly enables MySQL foreign-key checks on every checkout so constraint assertions are deterministic.
 - Destructive Alembic round-trip tests are collected last; they repeatedly rebuild the shared disposable schema and clean it when complete.
 
-`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 114 tests and reported 93.61% coverage, including users/authentication, workspace/membership RBAC, nested Task CRUD and isolation, transaction rollback behavior, final ORM constraints, migration round trips, and unsafe-downgrade protection. There is no configured formatter, linter, type checker, or CI workflow.
+`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 161 tests and reported approximately 93.5% coverage, including users/authentication, workspace/membership RBAC, nested Task CRUD and isolation, status/assignment permissions and idempotency, real-MySQL concurrency, member-removal cleanup, transaction rollback behavior, final ORM constraints, migration round trips, and unsafe-downgrade protection. There is no configured formatter, linter, type checker, or CI workflow.
 
 ## Architecture
 
@@ -101,20 +101,20 @@ The production request path follows router → dependency/service → SQLAlchemy
 
 - `app/main.py` creates the FastAPI app, mounts user, task, workspace, and workspace-member routers, registers exception handlers, and installs request logging middleware. It does not call `Base.metadata.create_all()`.
 - `app/routers/users.py` exposes registration, OAuth2 password-form login, and `/users/me`.
-- `app/routers/tasks.py` exposes workspace-nested Task CRUD at `/workspaces/{workspace_id}/tasks`, with filtering, offset pagination, and stable sorting. The old flat `/tasks` API no longer exists.
+- `app/routers/tasks.py` exposes workspace-nested Task CRUD at `/workspaces/{workspace_id}/tasks`, dedicated `/{task_id}/status` and `/{task_id}/assignee` PATCH operations, filtering, offset pagination, and stable sorting. The old flat `/tasks` API no longer exists.
 - `app/routers/workspaces.py` exposes authenticated workspace creation, membership-scoped detail, and membership-scoped listing.
 - `app/routers/workspace_members.py` exposes membership listing plus role-controlled member creation, role updates, and removal.
 - `app/services/user_service.py` handles user lookup, registration, and credential verification.
-- `app/services/task_service.py` handles Task queries and writes using `workspace_id` as the isolation boundary. Creation derives workspace and creator from trusted access context; updates use explicit fields and role/creator policy checks.
+- `app/services/task_service.py` handles Task queries and writes using `workspace_id` as the isolation boundary. Creation derives workspace and creator from trusted access context; general updates use explicit fields and role/creator checks. Status and assignee workflows lock current membership rows before the Task row, re-read protected state, and own their transaction through commit or rollback.
 - `app/services/workspace_service.py` owns the workspace use cases. Workspace creation inserts the workspace and its one `OWNER` membership in a single transaction.
-- `app/services/workspace_member_service.py` owns member list/add/update/remove use cases and their transaction boundaries.
+- `app/services/workspace_member_service.py` owns member list/add/update/remove use cases and their transaction boundaries. Removal locks the target membership and atomically clears that user's unfinished Task assignments with one bulk update before deleting the membership; DONE assignments remain as history.
 - `app/models.py` defines `User`, final `Task`, `Workspace`, and `WorkspaceMember`. Task has required workspace/creator/status/timestamps, optional assignee, explicit creator/assignee foreign-key relationships, and no legacy owner/completed columns. Membership uses a composite `(workspace_id, user_id)` primary key.
 - `app/enums.py` defines shared string enums `MemberRole` and `TaskStatus`; SQLAlchemy persists them as constrained `VARCHAR`, not MySQL native `ENUM`.
-- `app/schemas.py` defines Pydantic request/response models. Workspace and Task write schemas forbid extra fields. Task creation cannot accept server-controlled ownership, assignment, status, or timestamp fields; general Task updates permit only title, description, and priority.
+- `app/schemas.py` defines Pydantic request/response models. Workspace and Task write schemas forbid extra fields. Task creation cannot accept server-controlled ownership, assignment, status, or timestamp fields; general Task updates permit only title, description, and priority. `TaskStatusUpdate` and `TaskAssigneeUpdate` isolate workflow-controlled fields on dedicated endpoints.
 - `app/database.py` owns the engine, declarative base, session factory, and request-scoped `get_db()` dependency.
 - `app/security.py` uses pwdlib's recommended password hash and creates 30-minute-by-default HS256 access tokens whose `sub` is currently the username.
 - `app/dependencies.py` resolves a bearer token to the current database user, builds read-only `WorkspaceAccess` and `WorkspaceTaskAccess` contexts, and provides the `require_workspace_roles(...)` dependency factory. Workspace membership is proven before a task lookup, preventing cross-workspace resource enumeration.
-- `app/policies.py` contains pure membership-role and Task edit/delete policy functions; dependencies establish resource boundaries while services enforce creator-sensitive actions.
+- `app/policies.py` contains pure membership-role, Task edit/delete, status-transition, and self-assignment policy functions; dependencies establish resource boundaries while services map policy outcomes to stable domain errors.
 - `app/exceptions.py` defines domain exceptions. `app/main.py` serializes `AppException` as `{"code": ..., "message": ...}`.
 - `app/logging_config.py` configures console logging. Application request logs record method, path, status, and duration; SQLAlchemy engine echo is disabled.
 
@@ -124,14 +124,15 @@ The `/health` endpoint currently reports only process liveness and does not chec
 
 - Schema changes are managed by Alembic. Repository head `d4b6e8f1a203` follows `c1e8d5a4b762` and `9f4c2a7b1d30`: Revision 1 adds nullable compatibility fields and migration infrastructure; Revision 2 creates personal Workspaces/OWNER memberships and backfills legacy Tasks; Revision 3 validates the backfill, makes final fields non-null, adds final defaults/checks, and removes `owner_id`/`completed`.
 - The development database remains at `6c2f9a4d7e31`; do not deploy the current code independently of the full 2B/2C migration chain. The code and all three Task collaboration revisions must be deployed together after 2C is complete and explicitly authorized.
-- `task_collaboration_user_workspace_map` remains temporary migration infrastructure, not a business ORM model. `alembic/env.py` excludes only this table from autogenerate comparison. Its removal and the matching exclusion cleanup are deferred to 2C-2.
+- `task_collaboration_user_workspace_map` remains temporary migration infrastructure, not a business ORM model. `alembic/env.py` excludes only this table from autogenerate comparison. Do not remove it during 2C-2: Revision 2 downgrade still depends on it, and cleanup is deferred to a separate batch after the complete migration chain is deployed to development and passes stable acceptance.
 - `app.main` does not create tables on import.
 - `SessionLocal` uses `autoflush=False` and `expire_on_commit=False`; `get_db()` always closes the request session.
-- Routers and dependencies never commit. Each top-level write service owns one use-case transaction, commits once, and rolls back on SQLAlchemy failures.
+- Routers and dependencies never commit. Each top-level write service owns one use-case transaction, commits once, and rolls back on SQLAlchemy failures. Status/assignee operations also explicitly roll back domain errors after acquiring row locks, and perform no database I/O after commit.
 - Task list queries are always scoped to `workspace_id`. Detail, update, and delete first prove workspace membership and then query by both task ID and workspace ID.
 - Workspace access first proves database membership. Missing workspaces and non-members both receive `WORKSPACE_NOT_FOUND`; authenticated members with insufficient roles receive `WORKSPACE_PERMISSION_DENIED`.
 - `Workspace.created_by_id` records immutable provenance at the API boundary, while current authority comes from `WorkspaceMember.role`.
-- OWNER and ADMIN can edit/delete any Task in their Workspace; MEMBER can edit/delete only Tasks they created. Status and assignee are excluded from general PATCH. `/status`, `/assignee`, state-transition policy, self-assignment, assignment cleanup during member removal, and mapping-table removal are 2C-2 work and must not be improvised in general CRUD.
+- OWNER and ADMIN can edit/delete any Task in their Workspace and can move Tasks between any statuses. MEMBER can edit/delete only Tasks they created, but status authority depends on assignment: an assigned MEMBER may advance only `TODO -> IN_PROGRESS -> DONE`.
+- Status and assignee remain excluded from general PATCH. OWNER/ADMIN can assign, reassign, or clear unfinished Tasks to current members. MEMBER can claim an unassigned unfinished Task or release their own; DONE assignments are frozen unless an authorized manager first reopens the Task. Exact-value requests are idempotent and do not change `updated_at`.
 
 When changing models, create and review an Alembic migration. Do not rely on `create_all()` to update an existing database. MySQL DDL is not transactional, so split risky schema changes and data backfills into staged migrations.
 
