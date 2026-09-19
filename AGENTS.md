@@ -102,7 +102,7 @@ Important safety behavior:
 - Destructive Alembic round-trip tests are collected last; they repeatedly rebuild the shared disposable schema and clean it when complete.
 - `tests/test_rate_limiter.py` starts an exact, loopback-only Redis container with tmpfs and no volume. It validates the Lua script against real Redis, including strict concurrent accounting, and removes the exact container in fixture cleanup. Ordinary API tests inject a permissive limiter and never connect to development Redis.
 
-`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 186 tests and reported approximately 94% application coverage. Coverage includes users/authentication, Redis rate-limit algorithms and failure policy, workspace/membership RBAC, nested Task CRUD and isolation, status/assignment permissions and idempotency, real-MySQL and real-Redis concurrency, member-removal cleanup, transaction rollback behavior, final ORM constraints, migration round trips, and unsafe-downgrade protection. There is no configured formatter, linter, type checker, or CI workflow.
+`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 187 tests and reported approximately 94% application coverage. Coverage includes users/authentication, Redis rate-limit algorithms and failure policy, workspace/membership RBAC, nested Task CRUD and isolation, status/assignment permissions and idempotency, real-MySQL and real-Redis concurrency, member-removal cleanup, transaction rollback behavior, final ORM constraints, migration round trips, and unsafe-downgrade protection. There is no configured formatter, linter, type checker, or CI workflow.
 
 ## Architecture
 
@@ -164,7 +164,7 @@ When changing models, create and review an Alembic migration. Do not rely on `cr
 
 - `Dockerfile` uses Python 3.13 slim, installs `requirements.txt`, copies the application, and starts Uvicorn.
 - `compose.yml` defines MySQL, Redis, and API services, health checks, startup migration, and the persistent `mysql_data` volume.
-- Redis uses the explicit `redis:7.4.2-alpine` image, is reachable only on the internal Compose network, has no host port or volume, and runs with RDB/AOF disabled. Its rate-limit windows are intentionally ephemeral and reset when the Redis container is recreated.
+- Redis uses the explicit `redis:7.4.2-alpine` image, is reachable only on the internal Compose network, and runs with RDB/AOF disabled. Its `/data` path is explicitly overlaid with tmpfs rather than a persistent Docker volume, so rate-limit windows are intentionally ephemeral and clear when the Redis container stops or is recreated.
 - API startup waits for MySQL but does not require Redis to be healthy. The Redis pool connects lazily; request-level fail-open/fail-closed policy handles outages, and application shutdown disconnects the pool.
 - Compose may read the root `.env` for interpolation, but the API service receives only its listed database, JWT, Redis, and rate-limit settings. MySQL initialization variables belong only to the database service.
 - `.dockerignore` excludes `.env`, Git metadata, virtual environments, caches, coverage output, macOS metadata, practice files, and `CLAUDE.md`.

@@ -20,12 +20,14 @@ services:
       retries: 5
       start_period: 30s
 
-  # 限流计数是短期数据：禁用RDB/AOF且不挂载volume，容器重建会清空窗口。
+  # 限流计数是短期数据：/data使用tmpfs且禁用RDB/AOF，不使用持久化Docker volume；容器停止或重建会清空窗口。
   redis:
     image: redis:7.4.2-alpine
     container_name: task_redis
     restart: always
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs:
+      - /data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

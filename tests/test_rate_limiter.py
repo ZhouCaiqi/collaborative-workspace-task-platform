@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import subprocess
 from threading import Event
 import time
@@ -12,6 +13,7 @@ from redis import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import func, select, text
 from starlette.requests import Request
+import yaml
 
 from app.config import Settings, settings
 from app.main import app
@@ -28,6 +30,28 @@ from app.services import user_service, workspace_service
 
 
 REDIS_IMAGE = "redis:7.4.2-alpine"
+
+
+def test_compose_redis_is_ephemeral_and_internal_only():
+    compose_path = Path(__file__).parents[1] / "compose.yml"
+    compose_config = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    services = compose_config["services"]
+    redis_service = services["redis"]
+
+    assert redis_service["image"] == REDIS_IMAGE
+    assert "/data" in redis_service["tmpfs"]
+    assert "ports" not in redis_service
+    assert "volumes" not in redis_service
+    assert redis_service["command"] == [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+    ]
+    assert services["api"]["environment"]["REDIS_URL"] == (
+        "redis://redis:6379/0"
+    )
 
 
 class ControlledRateLimiter:
