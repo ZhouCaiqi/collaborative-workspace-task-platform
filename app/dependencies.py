@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,6 +15,11 @@ from app.exceptions import (
     WorkspacePermissionDeniedError,
 )
 from app.models import Task, User, Workspace, WorkspaceMember
+from app.rate_limiter import (
+    RateLimiter,
+    enforce_write_rate_limit,
+    get_rate_limiter,
+)
 from app.security import decode_access_token
 from app.services import user_service
 
@@ -136,6 +141,86 @@ def require_workspace_roles(
     ) -> WorkspaceAccess:
         if access.membership.role not in allowed_roles:
             raise WorkspacePermissionDeniedError()
+        return access
+
+    return dependency
+
+
+def get_rate_limited_current_user(
+    scope: str,
+) -> Callable[..., User]:
+    def dependency(
+        request: Request,
+        current_user: User = Depends(get_current_user),
+        limiter: RateLimiter = Depends(get_rate_limiter),
+    ) -> User:
+        enforce_write_rate_limit(
+            limiter=limiter,
+            user_id=current_user.id,
+            scope=scope,
+            workspace_id=None,
+        )
+        return current_user
+
+    return dependency
+
+
+def get_rate_limited_workspace_access(
+    scope: str,
+) -> Callable[..., WorkspaceAccess]:
+    def dependency(
+        request: Request,
+        access: WorkspaceAccess = Depends(get_workspace_access),
+        limiter: RateLimiter = Depends(get_rate_limiter),
+    ) -> WorkspaceAccess:
+        enforce_write_rate_limit(
+            limiter=limiter,
+            user_id=access.current_user.id,
+            scope=scope,
+            workspace_id=access.workspace.id,
+        )
+        return access
+
+    return dependency
+
+
+def get_rate_limited_workspace_task_access(
+    scope: str,
+) -> Callable[..., WorkspaceTaskAccess]:
+    def dependency(
+        request: Request,
+        access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
+        limiter: RateLimiter = Depends(get_rate_limiter),
+    ) -> WorkspaceTaskAccess:
+        workspace_access = access.workspace_access
+        enforce_write_rate_limit(
+            limiter=limiter,
+            user_id=workspace_access.current_user.id,
+            scope=scope,
+            workspace_id=workspace_access.workspace.id,
+        )
+        return access
+
+    return dependency
+
+
+def require_rate_limited_workspace_roles(
+    scope: str,
+    *allowed_roles: MemberRole,
+) -> Callable[..., WorkspaceAccess]:
+    role_dependency = require_workspace_roles(*allowed_roles)
+
+    def dependency(
+        request: Request,
+        access: WorkspaceAccess = Depends(role_dependency),
+        limiter: RateLimiter = Depends(get_rate_limiter),
+    ) -> WorkspaceAccess:
+        enforce_write_rate_limit(
+            limiter=limiter,
+            user_id=access.current_user.id,
+            scope=scope,
+            workspace_id=access.workspace.id,
+        )
         return access
 
     return dependency

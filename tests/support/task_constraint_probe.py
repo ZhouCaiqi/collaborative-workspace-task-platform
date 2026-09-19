@@ -303,7 +303,9 @@ def _run_probe() -> None:
                 "description": None,
                 "workspace_id": workspace_id,
                 "creator_id": user_id,
-                "assignee_id": None,
+                # Keep every non-target FK on a valid, non-null parent so each
+                # case exercises exactly the constraint named by its override.
+                "assignee_id": user_id,
                 "status": "TODO",
                 "created_at": now,
                 "updated_at": now,

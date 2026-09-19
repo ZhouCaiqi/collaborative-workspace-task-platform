@@ -1,15 +1,172 @@
+from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
+import secrets
 import subprocess
 import sys
+import time
+from uuid import uuid4
 
+import pymysql
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy import inspect
 from sqlalchemy.dialects.mysql import DATETIME
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import configure_mappers
 
 from app.enums import TaskStatus
 from app.models import Task, User, Workspace
+
+
+MYSQL_PROBE_IMAGE = "mysql:9.7.2"
+
+
+@contextmanager
+def _isolated_constraint_mysql_url():
+    suffix = uuid4().hex
+    container_name = f"task_test_mysql_constraint_{suffix}"
+    try:
+        database_name = f"task_constraint_{suffix[:12]}_test_db"
+        username = f"probe_{suffix[:12]}"
+        password = secrets.token_hex(24)
+        root_password = secrets.token_hex(24)
+
+        run_result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--rm",
+                "--name",
+                container_name,
+                "--publish",
+                "127.0.0.1::3306",
+                "--tmpfs",
+                "/var/lib/mysql:rw,nosuid,size=512m",
+                "--env",
+                f"MYSQL_ROOT_PASSWORD={root_password}",
+                "--env",
+                f"MYSQL_DATABASE={database_name}",
+                "--env",
+                f"MYSQL_USER={username}",
+                "--env",
+                f"MYSQL_PASSWORD={password}",
+                MYSQL_PROBE_IMAGE,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if run_result.returncode != 0:
+            raise RuntimeError("temporary MySQL container could not be created")
+
+        inspect_result = subprocess.run(
+            ["docker", "inspect", container_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if inspect_result.returncode != 0:
+            raise RuntimeError("temporary MySQL container could not be inspected")
+        container_data = json.loads(inspect_result.stdout)[0]
+        port_binding = container_data["NetworkSettings"]["Ports"][
+            "3306/tcp"
+        ][0]
+        if port_binding["HostIp"] != "127.0.0.1":
+            raise RuntimeError("temporary MySQL is not loopback-only")
+        if container_data["HostConfig"].get("Binds"):
+            raise RuntimeError("temporary MySQL unexpectedly has bind mounts")
+        if any(
+            mount.get("Type") == "volume"
+            for mount in container_data.get("Mounts", [])
+        ):
+            raise RuntimeError("temporary MySQL unexpectedly has a volume")
+        if "/var/lib/mysql" not in container_data["HostConfig"].get(
+            "Tmpfs",
+            {},
+        ):
+            raise RuntimeError("temporary MySQL data directory is not tmpfs")
+        host_port = int(port_binding["HostPort"])
+
+        deadline = time.monotonic() + 90
+        while True:
+            try:
+                connection = pymysql.connect(
+                    host="127.0.0.1",
+                    port=host_port,
+                    user=username,
+                    password=password,
+                    database=database_name,
+                    connect_timeout=1,
+                    read_timeout=1,
+                    write_timeout=1,
+                    autocommit=True,
+                )
+                break
+            except pymysql.MySQLError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "temporary MySQL did not become ready"
+                    ) from None
+                time.sleep(0.2)
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT VERSION(), @@SESSION.FOREIGN_KEY_CHECKS, "
+                    "@@GLOBAL.innodb_native_foreign_keys"
+                )
+                version, foreign_key_checks, native_foreign_keys = cursor.fetchone()
+                cursor.execute("SHOW GRANTS FOR CURRENT_USER")
+                grants = [row[0] for row in cursor.fetchall()]
+        finally:
+            connection.close()
+
+        if not str(version).startswith("9.7.2"):
+            raise RuntimeError("temporary MySQL version is not 9.7.2")
+        if int(foreign_key_checks) != 1:
+            raise RuntimeError("temporary MySQL foreign-key checks are disabled")
+        if int(native_foreign_keys) != 0:
+            raise RuntimeError("temporary MySQL native foreign keys are enabled")
+
+        database_grant_marker = f"on `{database_name}`.*"
+        for grant in grants:
+            normalized_grant = (
+                grant.casefold()
+                .replace(r"\_", "_")
+                .replace(r"\%", "%")
+            )
+            if "grant usage on *.*" in normalized_grant:
+                continue
+            if database_grant_marker not in normalized_grant:
+                raise RuntimeError("temporary MySQL user has excessive privileges")
+
+        temporary_url = make_url(
+            f"mysql+pymysql://{username}:{password}"
+            f"@127.0.0.1:{host_port}/{database_name}"
+        )
+        development_url = make_url(os.environ["DATABASE_URL"])
+        if (
+            temporary_url == development_url
+            or temporary_url.database == development_url.database
+        ):
+            raise RuntimeError("temporary MySQL matches the development target")
+
+        yield temporary_url.render_as_string(hide_password=False)
+    finally:
+        try:
+            subprocess.run(
+                ["docker", "rm", "--force", container_name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def test_task_status_is_a_shared_string_enum():
@@ -133,10 +290,9 @@ def test_final_task_relationships_have_unambiguous_foreign_keys():
     }
 
 
-def test_database_rejects_invalid_task_checks_and_foreign_keys(db_session):
-    # This black-box integration probe isolates the confirmed pytest-cov and
-    # MySQL 9.7 SQL-layer FK interaction, including test-schema creation.
-    # App coverage stays in this process.
+def test_database_rejects_invalid_task_checks_and_foreign_keys():
+    # The black-box constraint probe runs without coverage injection against a
+    # clean, exclusive MySQL server; application coverage stays in this process.
     probe_path = Path(__file__).parent / "support" / "task_constraint_probe.py"
     probe_environment = os.environ.copy()
     for variable_name in tuple(probe_environment):
@@ -147,18 +303,21 @@ def test_database_rejects_invalid_task_checks_and_foreign_keys(db_session):
         ):
             probe_environment.pop(variable_name)
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(probe_path),
-        ],
-        cwd=Path(__file__).parents[1],
-        env=probe_environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    with _isolated_constraint_mysql_url() as temporary_test_database_url:
+        probe_environment["TEST_DATABASE_URL"] = temporary_test_database_url
+        probe_environment["TEST_DATABASE_RESET_ALLOWED"] = "true"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(probe_path),
+            ],
+            cwd=Path(__file__).parents[1],
+            env=probe_environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
 
     assert result.returncode == 0, (
         f"task constraint probe exited with {result.returncode}: "

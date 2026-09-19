@@ -129,3 +129,26 @@ class OwnerMembershipConflictError(AppException):
             code="OWNER_MEMBERSHIP_CONFLICT",
             message="Workspace owner membership cannot be changed or removed",
         )
+
+
+class RateLimitExceededError(AppException):
+    def __init__(self, limit: int, retry_after: int):
+        super().__init__(
+            status_code=429,
+            code="RATE_LIMIT_EXCEEDED",
+            message="Too many requests",
+            headers={
+                "Retry-After": str(retry_after),
+                "X-RateLimit-Limit": str(limit),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+
+
+class RateLimitUnavailableError(AppException):
+    def __init__(self):
+        super().__init__(
+            status_code=503,
+            code="RATE_LIMIT_UNAVAILABLE",
+            message="Rate limit service unavailable",
+        )

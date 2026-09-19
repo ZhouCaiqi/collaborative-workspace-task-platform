@@ -5,7 +5,7 @@ from app.database import get_db
 from app.dependencies import (
     WorkspaceAccess,
     get_workspace_access,
-    require_workspace_roles,
+    require_rate_limited_workspace_roles,
 )
 from app.enums import MemberRole
 from app.schemas import (
@@ -46,7 +46,11 @@ def list_workspace_members(
 def add_workspace_member(
     data: WorkspaceMemberCreate,
     access: WorkspaceAccess = Depends(
-        require_workspace_roles(MemberRole.OWNER, MemberRole.ADMIN)
+        require_rate_limited_workspace_roles(
+            "member.add",
+            MemberRole.OWNER,
+            MemberRole.ADMIN,
+        )
     ),
     db: Session = Depends(get_db),
 ):
@@ -66,7 +70,10 @@ def update_workspace_member_role(
     user_id: int,
     data: WorkspaceMemberRoleUpdate,
     access: WorkspaceAccess = Depends(
-        require_workspace_roles(MemberRole.OWNER)
+        require_rate_limited_workspace_roles(
+            "member.update",
+            MemberRole.OWNER,
+        )
     ),
     db: Session = Depends(get_db),
 ):
@@ -85,7 +92,11 @@ def update_workspace_member_role(
 def remove_workspace_member(
     user_id: int,
     access: WorkspaceAccess = Depends(
-        require_workspace_roles(MemberRole.OWNER, MemberRole.ADMIN)
+        require_rate_limited_workspace_roles(
+            "member.remove",
+            MemberRole.OWNER,
+            MemberRole.ADMIN,
+        )
     ),
     db: Session = Depends(get_db),
 ):

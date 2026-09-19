@@ -2,7 +2,12 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import WorkspaceAccess, get_current_user, get_workspace_access
+from app.dependencies import (
+    WorkspaceAccess,
+    get_current_user,
+    get_rate_limited_current_user,
+    get_workspace_access,
+)
 from app.models import User
 from app.schemas import (
     WorkspaceCreate,
@@ -25,7 +30,9 @@ router = APIRouter(
 )
 def create_workspace(
     data: WorkspaceCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(
+        get_rate_limited_current_user("workspace.create")
+    ),
     db: Session = Depends(get_db),
 ):
     return workspace_service.create_workspace(

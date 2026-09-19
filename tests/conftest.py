@@ -119,6 +119,10 @@ if (validated_test_url.username or "").casefold() == "root":
 import app.models  # noqa: E402  # Ensure every ORM model is in Base.metadata.
 from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
+from app.rate_limiter import (  # noqa: E402
+    RateLimitDecision,
+    get_rate_limiter,
+)
 
 test_engine = create_engine(
     validated_test_url,
@@ -150,6 +154,32 @@ TestingSessionLocal = sessionmaker(
 )
 
 
+class PermissiveRateLimiter:
+    @staticmethod
+    def _decision():
+        return RateLimitDecision(
+            allowed=True,
+            limit=10_000,
+            count=1,
+            remaining=9_999,
+            retry_after=60,
+        )
+
+    def check_login(self, **_kwargs):
+        return self._decision()
+
+    def check_registration(self, **_kwargs):
+        return self._decision()
+
+    def check_write(self, **_kwargs):
+        return self._decision()
+
+
+@pytest.fixture()
+def permissive_rate_limiter():
+    return PermissiveRateLimiter()
+
+
 @pytest.fixture()
 def db_session():
     # Revalidate immediately before every destructive schema operation.
@@ -176,11 +206,14 @@ def db_session():
 
 
 @pytest.fixture()
-def client(db_session):
+def client(db_session, permissive_rate_limiter):
     def override_get_db():
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_rate_limiter] = (
+        lambda: permissive_rate_limiter
+    )
 
     with TestClient(app) as test_client:
         yield test_client

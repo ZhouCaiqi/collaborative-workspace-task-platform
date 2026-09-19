@@ -9,6 +9,10 @@ from app.security import create_access_token
 
 from app.dependencies import get_current_user
 from app.models import User
+from app.rate_limiter import (
+    enforce_login_rate_limit,
+    enforce_registration_rate_limit,
+)
 
 
 router = APIRouter(
@@ -19,7 +23,8 @@ router = APIRouter(
 
 @router.post("/register", status_code=201, response_model=UserResponse)
 def create_user(
-    user: UserCreate, 
+    user: UserCreate,
+    _rate_limit: None = Depends(enforce_registration_rate_limit),
     db: Session = Depends(get_db)
 ):
     return  user_service.create_user(
@@ -30,7 +35,9 @@ def create_user(
 
 @router.post("/login", response_model=TokenResponse)
 def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    form_data: OAuth2PasswordRequestForm = Depends(
+        enforce_login_rate_limit
+    ),
     db: Session = Depends(get_db)
 ):
     db_user = user_service.authenticate_user(

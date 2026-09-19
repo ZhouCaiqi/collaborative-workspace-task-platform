@@ -69,8 +69,7 @@ def authenticate_user(
     )
     if db_user is None:
         security_logger.warning(
-            "login_failed username=%s",
-            username
+            "login_failed reason=user_not_found"
         )
         raise InvalidCredentialsError()
     verify_result = verify_password(
@@ -79,8 +78,7 @@ def authenticate_user(
     )
     if verify_result is False:
         security_logger.warning(
-            "login_failed username=%s",
-            username
+            "login_failed reason=password_mismatch"
         )
         raise InvalidCredentialsError()
 

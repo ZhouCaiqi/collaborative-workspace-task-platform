@@ -7,6 +7,8 @@ from app.database import get_db
 from app.dependencies import (
     WorkspaceAccess,
     WorkspaceTaskAccess,
+    get_rate_limited_workspace_access,
+    get_rate_limited_workspace_task_access,
     get_workspace_access,
     get_workspace_task_access,
 )
@@ -48,7 +50,9 @@ def list_tasks(
 )
 def create_task(
     data: TaskCreate,
-    access: WorkspaceAccess = Depends(get_workspace_access),
+    access: WorkspaceAccess = Depends(
+        get_rate_limited_workspace_access("task.create")
+    ),
     db: Session = Depends(get_db),
 ):
     return task_service.create_task(
@@ -68,7 +72,9 @@ def get_task(
 @router.patch("/{task_id}", response_model=TaskResponse)
 def update_task(
     data: TaskUpdate,
-    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
+    access: WorkspaceTaskAccess = Depends(
+        get_rate_limited_workspace_task_access("task.update")
+    ),
     db: Session = Depends(get_db),
 ):
     return task_service.update_task(
@@ -81,7 +87,9 @@ def update_task(
 @router.patch("/{task_id}/status", response_model=TaskResponse)
 def update_task_status(
     data: TaskStatusUpdate,
-    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
+    access: WorkspaceTaskAccess = Depends(
+        get_rate_limited_workspace_task_access("task.status")
+    ),
     db: Session = Depends(get_db),
 ):
     return task_service.update_task_status(
@@ -94,7 +102,9 @@ def update_task_status(
 @router.patch("/{task_id}/assignee", response_model=TaskResponse)
 def update_task_assignee(
     data: TaskAssigneeUpdate,
-    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
+    access: WorkspaceTaskAccess = Depends(
+        get_rate_limited_workspace_task_access("task.assignee")
+    ),
     db: Session = Depends(get_db),
 ):
     return task_service.update_task_assignee(
@@ -109,7 +119,9 @@ def update_task_assignee(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def delete_task(
-    access: WorkspaceTaskAccess = Depends(get_workspace_task_access),
+    access: WorkspaceTaskAccess = Depends(
+        get_rate_limited_workspace_task_access("task.delete")
+    ),
     db: Session = Depends(get_db),
 ):
     task_service.delete_task(db=db, access=access)
