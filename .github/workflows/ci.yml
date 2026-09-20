@@ -1,0 +1,194 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "stage5/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MYSQL_ROOT_PASSWORD: ciRootBootstrapCredential2026
+      MYSQL_DATABASE: task_api_ci_test_db
+      MYSQL_USER: task_api_ci
+      MYSQL_PASSWORD: ciTestDatabaseCredential2026
+      TEST_DATABASE_URL: mysql+pymysql://task_api_ci:ciTestDatabaseCredential2026@127.0.0.1:3306/task_api_ci_test_db
+      DATABASE_URL: mysql+pymysql://ci_placeholder:ciPlaceholderCredential2026@127.0.0.1:3306/task_api_ci_placeholder_db
+      TEST_DATABASE_RESET_ALLOWED: "true"
+      SECRET_KEY: ciOnlyJwtSigningKeyNotForProduction2026
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+
+    services:
+      mysql:
+        image: mysql:9.7.2
+        env:
+          MYSQL_ROOT_PASSWORD: ciRootBootstrapCredential2026
+          MYSQL_DATABASE: task_api_ci_test_db
+          MYSQL_USER: task_api_ci
+          MYSQL_PASSWORD: ciTestDatabaseCredential2026
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+          --health-start-period=20s
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest==9.1.1 pytest-cov==7.1.0
+
+      - name: Report tool versions
+        run: |
+          python --version
+          python -m pip --version
+          docker --version
+          docker compose version
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+
+      - name: Wait for isolated MySQL and verify safety
+        run: |
+          python - <<'PY'
+          import os
+          import time
+
+          import pymysql
+
+
+          deadline = time.monotonic() + 120
+          connection = None
+          while time.monotonic() < deadline:
+              try:
+                  connection = pymysql.connect(
+                      host="127.0.0.1",
+                      port=3306,
+                      user=os.environ["MYSQL_USER"],
+                      password=os.environ["MYSQL_PASSWORD"],
+                      database=os.environ["MYSQL_DATABASE"],
+                      connect_timeout=2,
+                      read_timeout=2,
+                      write_timeout=2,
+                      autocommit=True,
+                  )
+                  break
+              except pymysql.MySQLError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("CI MySQL did not become ready within 120 seconds")
+
+          try:
+              with connection.cursor() as cursor:
+                  cursor.execute(
+                      "SELECT CURRENT_USER(), DATABASE(), "
+                      "@@SESSION.FOREIGN_KEY_CHECKS"
+                  )
+                  current_user, database_name, foreign_key_checks = cursor.fetchone()
+                  cursor.execute("SHOW GRANTS FOR CURRENT_USER")
+                  grants = [row[0] for row in cursor.fetchall()]
+          finally:
+              connection.close()
+
+          account_name = str(current_user).split("@", 1)[0].strip("'")
+          if account_name.casefold() == "root":
+              raise SystemExit("CI tests must not use the MySQL root account")
+          if database_name != os.environ["MYSQL_DATABASE"]:
+              raise SystemExit("CI MySQL connected to an unexpected database")
+          if int(foreign_key_checks) != 1:
+              raise SystemExit("CI MySQL foreign-key checks are disabled")
+
+          database_marker = f"on `{database_name}`.*"
+          for grant in grants:
+              normalized = (
+                  grant.casefold()
+                  .replace(r"\_", "_")
+                  .replace(r"\%", "%")
+              )
+              if "grant usage on *.*" in normalized:
+                  continue
+              if database_marker not in normalized:
+                  raise SystemExit("CI MySQL test account has excessive privileges")
+
+          print(
+              "CI MySQL ready: non-root=true, dedicated-database=true, "
+              "foreign-key-checks=enabled, grants=database-only"
+          )
+          PY
+
+      - name: Compile Python sources
+        run: python -m compileall -q app tests alembic
+
+      - name: Configure SQLAlchemy mappers
+        run: >-
+          python -c "import app.models; from sqlalchemy.orm import configure_mappers; configure_mappers()"
+
+      - name: Inspect Alembic history
+        run: |
+          alembic heads
+          alembic history
+
+      - name: Run default test suite
+        run: python -m pytest
+
+      - name: Verify temporary probe cleanup
+        if: always()
+        run: |
+          python - <<'PY'
+          import subprocess
+
+
+          result = subprocess.run(
+              ["docker", "ps", "-a", "--format", "{{.Names}}"],
+              check=True,
+              capture_output=True,
+              text=True,
+              timeout=15,
+          )
+          prefixes = (
+              "task_test_mysql_constraint_",
+              "task_test_redis_rate_limit_",
+          )
+          residual = [
+              name
+              for name in result.stdout.splitlines()
+              if name.startswith(prefixes)
+          ]
+          if residual:
+              print("Temporary probe containers remain after tests:")
+              for name in residual:
+                  print(name)
+              raise SystemExit(1)
+          print("Temporary MySQL and Redis probe cleanup verified")
+          PY

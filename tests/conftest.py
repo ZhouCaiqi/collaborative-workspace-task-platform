@@ -5,10 +5,11 @@ import warnings
 import pytest
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
@@ -94,6 +95,17 @@ def _assert_test_database_is_safe():
     )
 
 
+def pytest_collection_modifyitems(items):
+    # Alembic round-trip tests perform repeated MySQL DDL on the shared,
+    # disposable test schema. Run them after ORM/API tests so InnoDB metadata
+    # churn cannot influence constraints created later by Base.metadata.
+    items.sort(
+        key=lambda item: (
+            item.path.name == "test_task_collaboration_migrations.py"
+        )
+    )
+
+
 validated_test_url = _assert_test_database_is_safe()
 
 if (validated_test_url.username or "").casefold() == "root":
@@ -107,11 +119,33 @@ if (validated_test_url.username or "").casefold() == "root":
 import app.models  # noqa: E402  # Ensure every ORM model is in Base.metadata.
 from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
+from app.rate_limiter import (  # noqa: E402
+    RateLimitDecision,
+    get_rate_limiter,
+)
 
 test_engine = create_engine(
     validated_test_url,
-    echo=False
+    echo=False,
+    poolclass=NullPool,
 )
+
+
+@event.listens_for(test_engine, "checkout")
+def _enable_mysql_foreign_key_checks(
+    dbapi_connection,
+    _connection_record,
+    _connection_proxy,
+):
+    # A Session can return its connection after commit and later check out a
+    # different pooled connection. Enforce constraints on every checkout so
+    # destructive migration/metadata tests cannot leak session state.
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("SET SESSION FOREIGN_KEY_CHECKS = 1")
+    finally:
+        cursor.close()
+
 
 TestingSessionLocal = sessionmaker(
     bind=test_engine,
@@ -120,16 +154,43 @@ TestingSessionLocal = sessionmaker(
 )
 
 
+class PermissiveRateLimiter:
+    @staticmethod
+    def _decision():
+        return RateLimitDecision(
+            allowed=True,
+            limit=10_000,
+            count=1,
+            remaining=9_999,
+            retry_after=60,
+        )
+
+    def check_login(self, **_kwargs):
+        return self._decision()
+
+    def check_registration(self, **_kwargs):
+        return self._decision()
+
+    def check_write(self, **_kwargs):
+        return self._decision()
+
+
+@pytest.fixture()
+def permissive_rate_limiter():
+    return PermissiveRateLimiter()
+
+
 @pytest.fixture()
 def db_session():
     # Revalidate immediately before every destructive schema operation.
     if test_engine.url != _assert_test_database_is_safe():
         raise RuntimeError("The validated test database no longer matches the engine")
+    test_engine.dispose()
     Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
     Base.metadata.create_all(bind=test_engine)
 
     db = TestingSessionLocal()
-
     try:
         yield db
     finally:
@@ -139,15 +200,20 @@ def db_session():
             raise RuntimeError(
                 "The validated test database no longer matches the engine"
             )
+        test_engine.dispose()
         Base.metadata.drop_all(bind=test_engine)
+        test_engine.dispose()
 
 
 @pytest.fixture()
-def client(db_session):
+def client(db_session, permissive_rate_limiter):
     def override_get_db():
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_rate_limiter] = (
+        lambda: permissive_rate_limiter
+    )
 
     with TestClient(app) as test_client:
         yield test_client
@@ -215,3 +281,54 @@ def second_auth_headers(client):
     return {
         "Authorization": f"Bearer {token}"
     }
+
+
+@pytest.fixture()
+def user_factory(client):
+    created_count = 0
+
+    def create_user(prefix="workspace_user"):
+        nonlocal created_count
+        created_count += 1
+        user_data = {
+            "username": f"{prefix}_{created_count}",
+            "password": "workspace_password_123",
+        }
+
+        register_response = client.post(
+            "/users/register",
+            json=user_data,
+        )
+        assert register_response.status_code == 201
+
+        login_response = client.post(
+            "/users/login",
+            data=user_data,
+        )
+        assert login_response.status_code == 200
+
+        return {
+            "id": register_response.json()["id"],
+            "username": user_data["username"],
+            "headers": {
+                "Authorization": (
+                    f"Bearer {login_response.json()['access_token']}"
+                )
+            },
+        }
+
+    return create_user
+
+
+@pytest.fixture()
+def workspace_factory(client):
+    def create_workspace(headers, name="Collaboration Workspace"):
+        response = client.post(
+            "/workspaces",
+            headers=headers,
+            json={"name": name},
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    return create_workspace

@@ -1,11 +1,14 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.routers.users import router as users_router
 from app.routers.tasks import router as tasks_router
-from app.database import Base, engine
-from app.models import Task, User
+from app.routers.workspace_members import router as workspace_members_router
+from app.routers.workspaces import router as workspaces_router
 from app.exceptions import AppException
+from app.rate_limiter import close_rate_limiter
 import logging
 import time
 from app.logging_config import setup_logging
@@ -15,12 +18,22 @@ setup_logging()
 logger = logging.getLogger(__name__)
 request_logger = logging.getLogger("app.request")
 
-app = FastAPI(
-    title="Task Management API"
-)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Redis is intentionally lazy: API startup and Alembic do not require an
+    # immediate successful connection. Request-level policy handles outages.
+    yield
+    close_rate_limiter()
+
+
+app = FastAPI(title="Task Management API", lifespan=lifespan)
 
 app.include_router(tasks_router)
 app.include_router(users_router)
+app.include_router(workspaces_router)
+app.include_router(workspace_members_router)
+
+
 @app.get("/health", tags=["system"])
 def health_check():
     return {"status": "ok"}
