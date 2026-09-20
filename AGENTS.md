@@ -102,7 +102,16 @@ Important safety behavior:
 - Destructive Alembic round-trip tests are collected last; they repeatedly rebuild the shared disposable schema and clean it when complete.
 - `tests/test_rate_limiter.py` starts an exact, loopback-only Redis container with tmpfs and no volume. It validates the Lua script against real Redis, including strict concurrent accounting, and removes the exact container in fixture cleanup. Ordinary API tests inject a permissive limiter and never connect to development Redis.
 
-`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 187 tests and reported approximately 94% application coverage. Coverage includes users/authentication, Redis rate-limit algorithms and failure policy, workspace/membership RBAC, nested Task CRUD and isolation, status/assignment permissions and idempotency, real-MySQL and real-Redis concurrency, member-removal cleanup, transaction rollback behavior, final ORM constraints, migration round trips, and unsafe-downgrade protection. There is no configured formatter, linter, type checker, or CI workflow.
+`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 187 tests and reported approximately 94% application coverage. Coverage includes users/authentication, Redis rate-limit algorithms and failure policy, workspace/membership RBAC, nested Task CRUD and isolation, status/assignment permissions and idempotency, real-MySQL and real-Redis concurrency, member-removal cleanup, transaction rollback behavior, final ORM constraints, migration round trips, and unsafe-downgrade protection. There is no configured formatter, linter, or type checker.
+
+## Continuous integration
+
+- `.github/workflows/ci.yml` runs on pushes to `main` and `stage5/**`, pull requests targeting `main`, and manual `workflow_dispatch` runs.
+- CI uses Python 3.13 and a MySQL 9.7.2 service container. The main test connection uses a dedicated non-root account whose grants are limited to the disposable `*_test_db` database.
+- CI runs the repository-default `python -m pytest` command, so all 187 tests, branch coverage, and the 85% coverage floor from `pytest.ini` remain enforced.
+- The GitHub-hosted runner's Docker daemon is used directly by the real MySQL constraint probe and real Redis concurrency probe. Those probes use random loopback ports, tmpfs storage, exact container names, and exact-container cleanup; CI fails if a project-named probe container remains afterward.
+- CI supplies fixed, CI-only test constants without reading the real `.env` or GitHub Secrets. `TEST_DATABASE_URL` targets only the disposable service database; the distinct `DATABASE_URL` is an unconnected configuration placeholder, so CI never connects to the development database.
+- Workflow permissions are limited to `contents: read`. CI does not deploy, push, start the Compose stack, or use `pull_request_target`.
 
 ## Architecture
 
