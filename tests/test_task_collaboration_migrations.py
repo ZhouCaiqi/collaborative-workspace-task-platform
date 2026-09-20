@@ -12,6 +12,7 @@ BASELINE_REVISION = "6c2f9a4d7e31"
 STRUCTURE_REVISION = "9f4c2a7b1d30"
 BACKFILL_REVISION = "c1e8d5a4b762"
 FINAL_REVISION = "d4b6e8f1a203"
+CLEANUP_REVISION = "e5a1c7d9b302"
 MAPPING_TABLE = "task_collaboration_user_workspace_map"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -336,7 +337,11 @@ def _assert_backfilled(seed: dict) -> list[dict]:
     return mappings
 
 
-def _assert_finalized(seed: dict) -> None:
+def _assert_finalized(
+    seed: dict,
+    *,
+    mapping_table_exists: bool = True,
+) -> None:
     inspector = sa.inspect(test_engine)
     task_columns = {
         column["name"]: column
@@ -414,7 +419,9 @@ def _assert_finalized(seed: dict) -> None:
         "ix_tasks_creator_id": ("creator_id",),
         "ix_tasks_assignee_id": ("assignee_id",),
     }
-    assert MAPPING_TABLE in inspector.get_table_names()
+    assert (MAPPING_TABLE in inspector.get_table_names()) is (
+        mapping_table_exists
+    )
 
     with test_engine.connect() as connection:
         task_rows = connection.execute(
@@ -458,6 +465,32 @@ def _assert_finalized(seed: dict) -> None:
         assert tuple(existing_membership) == seed["existing_membership"]
 
 
+def _business_snapshot() -> dict[str, list[tuple]]:
+    statements = {
+        "users": (
+            "SELECT id, username, hashed_password FROM users ORDER BY id"
+        ),
+        "workspaces": (
+            "SELECT id, name, created_by_id, created_at, updated_at "
+            "FROM workspaces ORDER BY id"
+        ),
+        "workspace_members": (
+            "SELECT workspace_id, user_id, role, joined_at, updated_at "
+            "FROM workspace_members ORDER BY workspace_id, user_id"
+        ),
+        "tasks": (
+            "SELECT id, title, description, priority, workspace_id, "
+            "creator_id, assignee_id, status, created_at, updated_at "
+            "FROM tasks ORDER BY id"
+        ),
+    }
+    with test_engine.connect() as connection:
+        return {
+            name: [tuple(row) for row in connection.execute(sa.text(sql))]
+            for name, sql in statements.items()
+        }
+
+
 def test_task_collaboration_migrations_round_trip_and_repeat(
     migration_config,
 ):
@@ -475,7 +508,6 @@ def test_task_collaboration_migrations_round_trip_and_repeat(
     command.upgrade(migration_config, FINAL_REVISION)
     _assert_revision(FINAL_REVISION)
     _assert_finalized(seed)
-    command.check(migration_config)
 
     with test_engine.begin() as connection:
         connection.execute(
@@ -581,6 +613,120 @@ def test_task_collaboration_migrations_round_trip_and_repeat(
     command.upgrade(migration_config, FINAL_REVISION)
     _assert_revision(FINAL_REVISION)
     _assert_finalized(seed)
+
+
+def test_cleanup_revision_preserves_business_data_and_removes_mapping(
+    migration_config,
+):
+    command.upgrade(migration_config, BASELINE_REVISION)
+    seed = _seed_legacy_database()
+    command.upgrade(migration_config, FINAL_REVISION)
+    _assert_revision(FINAL_REVISION)
+    _assert_finalized(seed)
+
+    business_before = _business_snapshot()
+    with test_engine.connect() as connection:
+        mapping_count = connection.scalar(
+            sa.text(f"SELECT COUNT(*) FROM {MAPPING_TABLE}")
+        )
+    assert mapping_count == len(seed["user_ids"])
+
+    command.upgrade(migration_config, CLEANUP_REVISION)
+
+    _assert_revision(CLEANUP_REVISION)
+    _assert_finalized(seed, mapping_table_exists=False)
+    assert _business_snapshot() == business_before
+    command.check(migration_config)
+
+
+def test_cleanup_revision_rejects_downgrade_without_schema_changes(
+    migration_config,
+):
+    command.upgrade(migration_config, BASELINE_REVISION)
+    seed = _seed_legacy_database()
+    command.upgrade(migration_config, CLEANUP_REVISION)
+    _assert_revision(CLEANUP_REVISION)
+    _assert_finalized(seed, mapping_table_exists=False)
+    business_before = _business_snapshot()
+    table_names_before = set(sa.inspect(test_engine).get_table_names())
+
+    with pytest.raises(
+        RuntimeError,
+        match="irreversible cleanup boundary.*database backup",
+    ):
+        command.downgrade(migration_config, FINAL_REVISION)
+
+    _assert_revision(CLEANUP_REVISION)
+    assert set(sa.inspect(test_engine).get_table_names()) == table_names_before
+    assert MAPPING_TABLE not in table_names_before
+    assert _business_snapshot() == business_before
+    with test_engine.connect() as connection:
+        assert connection.scalar(sa.text("SELECT 1")) == 1
+    command.check(migration_config)
+
+
+def test_cleanup_revision_validation_stops_before_drop(migration_config):
+    command.upgrade(migration_config, BASELINE_REVISION)
+    seed = _seed_legacy_database()
+    command.upgrade(migration_config, FINAL_REVISION)
+
+    with test_engine.begin() as connection:
+        mapping = connection.execute(
+            sa.text(
+                f"SELECT user_id, workspace_id FROM {MAPPING_TABLE} "
+                "ORDER BY user_id LIMIT 1"
+            )
+        ).mappings().one()
+        wrong_creator_id = next(
+            user_id
+            for user_id in seed["user_ids"]
+            if user_id != mapping["user_id"]
+        )
+        connection.execute(
+            sa.text(
+                "UPDATE workspaces SET created_by_id = :wrong_creator_id "
+                "WHERE id = :workspace_id"
+            ),
+            {
+                "wrong_creator_id": wrong_creator_id,
+                "workspace_id": mapping["workspace_id"],
+            },
+        )
+
+    business_before = _business_snapshot()
+    with pytest.raises(
+        RuntimeError,
+        match="mapped workspace has the wrong creator",
+    ):
+        command.upgrade(migration_config, CLEANUP_REVISION)
+
+    _assert_revision(FINAL_REVISION)
+    assert MAPPING_TABLE in sa.inspect(test_engine).get_table_names()
+    assert _business_snapshot() == business_before
+    with test_engine.connect() as connection:
+        assert connection.scalar(sa.text("SELECT 1")) == 1
+
+
+def test_fresh_database_upgrades_to_cleanup_head(migration_config):
+    command.upgrade(migration_config, "head")
+
+    _assert_revision(CLEANUP_REVISION)
+    inspector = sa.inspect(test_engine)
+    assert MAPPING_TABLE not in inspector.get_table_names()
+    assert {
+        column["name"] for column in inspector.get_columns("tasks")
+    } == {
+        "id",
+        "title",
+        "description",
+        "priority",
+        "workspace_id",
+        "creator_id",
+        "assignee_id",
+        "status",
+        "created_at",
+        "updated_at",
+    }
     command.check(migration_config)
 
 
