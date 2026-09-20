@@ -45,7 +45,8 @@ From the repository root:
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements.txt
+python -m pip install pytest==9.1.1 pytest-cov==7.1.0
 ```
 
 Apply and inspect migrations:
@@ -102,7 +103,7 @@ Important safety behavior:
 - Destructive Alembic round-trip tests are collected last; they repeatedly rebuild the shared disposable schema and clean it when complete.
 - `tests/test_rate_limiter.py` starts an exact, loopback-only Redis container with tmpfs and no volume. It validates the Lua script against real Redis, including strict concurrent accounting, and removes the exact container in fixture cleanup. Ordinary API tests inject a permissive limiter and never connect to development Redis.
 
-`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 190 tests and reported approximately 94% application coverage. Coverage includes users/authentication, Redis rate-limit algorithms and failure policy, workspace/membership RBAC, nested Task CRUD and isolation, status/assignment permissions and idempotency, real-MySQL and real-Redis concurrency, member-removal cleanup, transaction rollback behavior, final ORM constraints, migration round trips, migration-map retirement, and unsafe-downgrade protection. There is no configured formatter, linter, or type checker.
+`pytest.ini` enables branch coverage and requires at least 85% coverage. At the time this guidance was updated, pytest collected 190 tests and reported 94.40% application coverage. Coverage includes users/authentication, Redis rate-limit algorithms and failure policy, workspace/membership RBAC, nested Task CRUD and isolation, status/assignment permissions and idempotency, real-MySQL and real-Redis concurrency, member-removal cleanup, transaction rollback behavior, final ORM constraints, migration round trips, migration-map retirement, and unsafe-downgrade protection. There is no configured formatter, linter, or type checker.
 
 ## Continuous integration
 
@@ -142,7 +143,7 @@ The `/health` endpoint currently reports only process liveness and does not chec
 ## Database and transaction behavior
 
 - Schema changes are managed by Alembic. Repository head `e5a1c7d9b302` follows `d4b6e8f1a203`: the first three Task collaboration revisions add compatibility fields, backfill personal Workspaces and Tasks, then enforce the final Task schema; the fourth validates the final schema and data before dropping the migration-only mapping table.
-- The development database was last accepted at `d4b6e8f1a203`. Stage 5E-2A adds the next revision for review and dedicated-test-database validation only; do not apply it to the development database until deployment is explicitly authorized.
+- The development database has been backed up, recovery-tested, upgraded, and accepted at `e5a1c7d9b302`; the migration-only mapping table is no longer present there.
 - At repository head, `task_collaboration_user_workspace_map` is retired and `alembic/env.py` no longer excludes any table from autogenerate comparison. Revision `e5a1c7d9b302` is an intentional irreversible boundary: its downgrade performs no DDL or DML and requires restoration of a pre-cleanup database backup.
 - `app.main` does not create tables on import.
 - `SessionLocal` uses `autoflush=False` and `expire_on_commit=False`; `get_db()` always closes the request session.
@@ -186,4 +187,4 @@ Do not start/stop containers, remove volumes, rebuild images, or run migrations 
 - Check `git status` before and after edits.
 - Do not commit, switch branches, clean files, alter database state, or run destructive Docker commands unless explicitly requested.
 - `.env`, credentials, keys, tokens, database dumps, local volumes, caches, and coverage artifacts must not be committed.
-- During the current collaboration-core stage, present the diff and verification results to the user; the user decides whether and when to commit.
+- For repository changes, present the diff and verification results to the user; the user decides whether and when to commit.
