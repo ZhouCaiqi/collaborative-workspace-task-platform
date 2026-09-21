@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -61,11 +61,7 @@ def get_current_user(
         security_logger.warning(
             "authentication_failed reason=user_not_found"
         )
-        raise HTTPException(
-            status_code=401,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+        raise InvalidTokenError()
 
     return user
 

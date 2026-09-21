@@ -1,3 +1,6 @@
+from app.security import create_access_token
+
+
 def test_login_success(client, registered_user):
     response = client.post(
         "/users/login",
@@ -44,6 +47,23 @@ def test_access_with_invalid_token(client):
 
     assert response.status_code == 401
     assert response.json()["code"] == "INVALID_TOKEN"
+
+
+def test_access_with_valid_token_for_missing_user_returns_invalid_token(client):
+    missing_username = "missing_auth_user"
+    token = create_access_token(missing_username)
+
+    response = client.get(
+        "/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "code": "INVALID_TOKEN",
+        "message": "Could not validate credentials",
+    }
+    assert missing_username not in response.text
 
 
 def test_access_with_valid_token(client, auth_headers, workspace_factory):

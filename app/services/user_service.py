@@ -44,9 +44,9 @@ def create_user(
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
-        return None
+        raise UsernameAlreadyExistsError() from exc
     except SQLAlchemyError:
         db.rollback()
         raise
