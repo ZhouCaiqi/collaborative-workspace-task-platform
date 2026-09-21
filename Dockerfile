@@ -17,8 +17,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 6. 复制整个项目
 COPY . .
 
-# 7. 声明端口
+# 7. 创建固定 UID/GID 的非 root 运行用户
+RUN groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid 10001 --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin appuser
+
+# 8. 声明端口
 EXPOSE 8000
 
-# 8. 启动 Uvicorn
+# 9. 使用非 root 用户启动 Uvicorn
+USER appuser
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

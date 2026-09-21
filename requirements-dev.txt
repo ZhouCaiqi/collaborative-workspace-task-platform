@@ -1,4 +1,3 @@
 -r requirements.txt
-pytest
-httpx2
-pytest-cov
+pytest==9.1.1
+pytest-cov==7.1.0
