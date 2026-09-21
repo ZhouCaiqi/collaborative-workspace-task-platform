@@ -15,6 +15,7 @@ from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import configure_mappers
 
+from app.database import engine
 from app.enums import TaskStatus
 from app.models import Task, User, Workspace
 
@@ -167,6 +168,10 @@ def _isolated_constraint_mysql_url():
             )
         except (OSError, subprocess.SubprocessError):
             pass
+
+
+def test_application_engine_hides_sql_parameters():
+    assert engine.hide_parameters is True
 
 
 def test_task_status_is_a_shared_string_enum():

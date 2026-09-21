@@ -1,3 +1,12 @@
+from app.security import create_access_token
+
+
+INVALID_TOKEN_BODY = {
+    "code": "INVALID_TOKEN",
+    "message": "Could not validate credentials",
+}
+
+
 def test_login_success(client, registered_user):
     response = client.post(
         "/users/login",
@@ -33,7 +42,8 @@ def test_access_without_token(client):
     response = client.get("/workspaces/1/tasks")
 
     assert response.status_code == 401
-    assert response.json()["code"] == "INVALID_TOKEN"
+    assert response.json() == INVALID_TOKEN_BODY
+    assert response.headers["WWW-Authenticate"] == "Bearer"
 
 
 def test_access_with_invalid_token(client):
@@ -43,7 +53,23 @@ def test_access_with_invalid_token(client):
     )
 
     assert response.status_code == 401
-    assert response.json()["code"] == "INVALID_TOKEN"
+    assert response.json() == INVALID_TOKEN_BODY
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_access_with_valid_token_for_missing_user_returns_invalid_token(client):
+    missing_username = "missing_auth_user"
+    token = create_access_token(missing_username)
+
+    response = client.get(
+        "/users/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == INVALID_TOKEN_BODY
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert missing_username not in response.text
 
 
 def test_access_with_valid_token(client, auth_headers, workspace_factory):
@@ -54,3 +80,21 @@ def test_access_with_valid_token(client, auth_headers, workspace_factory):
     )
 
     assert response.status_code == 200
+    assert "WWW-Authenticate" not in response.headers
+
+
+def test_non_auth_domain_error_does_not_include_bearer_challenge(
+    client,
+    auth_headers,
+):
+    response = client.get(
+        "/workspaces/999999999/tasks",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "WORKSPACE_NOT_FOUND",
+        "message": "Workspace not found",
+    }
+    assert "WWW-Authenticate" not in response.headers

@@ -6,6 +6,7 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 engine = create_engine(
     settings.database_url,
     echo=False,
+    hide_parameters=True,
     pool_pre_ping=True
 )
 

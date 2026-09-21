@@ -1,5 +1,6 @@
 .git
 .gitignore
+.github/
 
 .venv
 __pycache__/
@@ -10,6 +11,19 @@ htmlcov/
 
 .env
 .DS_Store
+.idea/
+.vscode/
 
 practice_files/
+*.diff
+
+tests/
+docs/
+README.md
+AGENTS.md
 CLAUDE.md
+pytest.ini
+requirements-dev.txt
+compose.yml
+Dockerfile
+.dockerignore
