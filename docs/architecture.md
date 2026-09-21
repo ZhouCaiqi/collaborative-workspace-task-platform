@@ -92,7 +92,7 @@ sequenceDiagram
 - 登录 body 使用 OAuth2 password form；注册使用 JSON。
 - JWT 的 `sub` 当前保存 username，默认有效期 30 分钟。
 - 缺少或无法解析的 Token 返回 401 `INVALID_TOKEN`；登录失败返回 401 `INVALID_CREDENTIALS`。
-- Workspace 角色不写入 JWT。每个受保护请求都读取数据库中的当前成员关系，角色变更和成员移除立即生效。
+- Workspace 角色不写入 JWT。每个新进入受保护边界的请求都读取数据库中的当前成员关系；在途事务的撤权边界见下文。
 - 密码、密码哈希、JWT、Authorization header、数据库 URL 和 Redis URL 不应进入日志。
 
 ## Workspace 与资源隐藏
@@ -165,6 +165,12 @@ Workspace 创建在同一事务中插入 Workspace 与 OWNER membership。成员
 
 这些交错使用独立 Session、Barrier/Event 和超时做确定性测试，不依赖 sleep。
 
+### 撤权与在途请求边界
+
+已完成权限检查并已进入事务的在途请求可能先于撤权操作完成；撤权保证作用于撤权提交后开始或重新检查权限的请求。状态和指派等关键竞争路径会额外锁定并重读 actor/target membership，但数据库锁只确定事务的串行顺序，不会自动让撤权操作获得绝对优先级。
+
+项目没有承诺撤权会使所有已经开始的请求失败。这是当前事务串行语义，不是已确认漏洞；在没有更强产品要求和确定性交错测试前，不为所有写路径引入全面 membership 锁。
+
 ## Redis 限流架构
 
 ```mermaid
@@ -196,7 +202,11 @@ SHA-256 只避免原始 IP/username 直接出现在 Key 和限流日志中。摘
 
 `AppException` 由全局 handler 序列化为 `{"code": ..., "message": ...}`，必要时附加 `WWW-Authenticate`、`Retry-After` 和 `X-RateLimit-*` 响应头。Pydantic/FastAPI 的 422 保留标准验证结构；未知异常只向客户端返回脱敏的 500。
 
-请求中间件记录 method、path、status 和 duration。安全日志使用 user_id、scope、workspace_id 或固定 reason，不记录密码、Token、Authorization header、请求体、连接 URL 或 `.env` 内容。
+请求中间件记录 method、path、status 和 duration。安全日志使用 user_id、scope、workspace_id 或固定 reason，不记录密码、Token、Authorization header、请求体、连接 URL 或 `.env` 内容。应用 SQLAlchemy Engine 启用 `hide_parameters=True`，避免 SQLAlchemy 日志和异常文本展示绑定参数；它不隐藏应用代码主动写入日志的业务数据，因此日志字段仍必须遵守上述约束。
+
+### OpenAPI 契约边界
+
+OpenAPI 主要描述路径、请求/响应 Schema 和成功响应；部分稳定领域错误码记录在 README 的错误表中。当前没有为每个 operation 在 OpenAPI 中完整枚举所有 401/403/404/409/429/503 响应，因此客户端不能只依赖 `/openapi.json` 获得完整错误契约。
 
 ## 运行时与容器
 
@@ -207,9 +217,11 @@ SHA-256 只避免原始 IP/username 直接出现在 Key 和限流日志中。摘
 - API command 在 Uvicorn 前执行 `alembic upgrade head`，并只等待 MySQL healthcheck。Redis 故障由请求级策略处理。
 - `/health` 只返回进程存活状态，不探测 MySQL 或 Redis。
 
+当前 Compose 只用于本地单实例开发；在 API 启动前自动运行迁移是本地便利设计。多实例或包含重要数据的环境应通过一次性、显式步骤执行并核验迁移，再启动应用实例。HTTPS、可信代理、CORS、Secret Manager、readiness 和公网网络边界尚未实现，由 Stage 6D 的具体部署方案决定。
+
 ## 测试分层
 
-最近验证结果为 190 tests、94.40% coverage，默认门槛为 85%。测试层次包括：
+最近一次本地完整测试结果为 194 passed、94.93% coverage，默认门槛为 85%；目标提交的 GitHub Actions 结果需要在推送后单独核验，最终 Release 前仍需确认目标 SHA 的 CI 结论。测试层次包括：
 
 1. Policy 与 Schema：纯权限规则、枚举、字段级限制、非法 payload。
 2. API/Service 集成：FastAPI TestClient + 真实 MySQL，覆盖认证、RBAC、隔离、CRUD、工作流、错误顺序和 rollback。

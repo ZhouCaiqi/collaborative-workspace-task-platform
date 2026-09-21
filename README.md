@@ -202,6 +202,8 @@ Task 列表支持：`status`、`priority`、`assignee_id`、`unassigned`、`limi
 
 未处理异常返回脱敏的 `INTERNAL_SERVER_ERROR`，请求日志只记录方法、路径、状态码和耗时，不记录请求体、密码、Token 或连接凭据。
 
+`INVALID_TOKEN` 响应同时携带 `WWW-Authenticate: Bearer`。上表是 OpenAPI 的补充契约：当前 `/openapi.json` 主要描述路径、请求/响应 Schema 和成功响应，尚未为每个 operation 完整枚举全部 401/403/404/409/429/503 领域错误。
+
 ## Redis 限流
 
 | 类别 | 默认窗口 | Key 维度 | Redis 故障策略 |
@@ -236,53 +238,208 @@ Task 列表支持：`status`、`priority`、`assignee_id`、`unassigned`、`limi
 
 完整 revision 链、回滚边界和验证方法见 [数据库迁移说明](docs/database-migrations.md)。
 
-## 本地启动
+## 从 fresh clone 到本地验证
 
-前置条件：Docker、Docker Compose，以及可用的 8000/3307 宿主机端口。
+### 1. 获取仓库并配置本机环境
+
+前置条件：Git、Docker、Docker Compose，以及可用的 8000/3307 宿主机端口。当前没有已知的 Apple Silicon 专用步骤。
 
 ```bash
+git clone https://github.com/ZhouCaiqi/task-management-api.git
+cd task-management-api
 cp .env.example .env
-# 编辑 .env，将所有示例占位值替换为仅供本机使用的值
+```
+
+编辑本地 `.env`，把所有 `your_password`、示例 Secret 和其他占位值替换为仅供本机使用的值。`.env` 已被 Git 和 Docker build context 排除；仍不得暂存、提交、粘贴到日志或分享其内容。
+
+### 2. 使用本地 Compose 启动
+
+```bash
 docker compose config --quiet
 docker compose up -d --build
 docker compose ps
-curl --noproxy "*" http://127.0.0.1:8000/health
 ```
 
-访问地址：
-
-- API：`http://127.0.0.1:8000`
-- Swagger UI：`http://127.0.0.1:8000/docs`
-- OpenAPI：`http://127.0.0.1:8000/openapi.json`
-
-`/health` 只表示 API 进程存活，不检查 MySQL 或 Redis readiness。Compose 启动 API 前等待 MySQL healthy，并运行 `alembic upgrade head`；对包含重要数据的环境应先审查迁移并完成可恢复备份。
-
-停止服务：
+等待 `task_db` 显示 healthy、`task_api` 显示 Up 后检查进程存活：
 
 ```bash
-docker compose down
+curl --noproxy "*" --include http://127.0.0.1:8000/health
 ```
 
-不要在需要保留数据时使用 `docker compose down -v`。MySQL 使用命名 volume；Redis 限流数据是 tmpfs 中的临时数据。
+预期 HTTP 200，body 为 `{"status":"ok"}`。其他本地入口：
 
-## 测试
+- Swagger UI：`http://127.0.0.1:8000/docs`
+- OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 
-最近一次已验证的仓库默认测试结果：**190 passed，94.40% coverage**。`pytest.ini` 开启分支覆盖率并设置 85% 最低门槛。
+当前 Compose 只面向本地单实例开发，不应直接暴露到公网。API 启动前等待 MySQL healthy，并自动执行 `alembic upgrade head`，这是本地便利设计，不是生产迁移方案。MySQL 的宿主机 3307 端口只供本地开发工具访问，不应在公网主机或路由器上开放。
+
+MySQL 数据保存在 `mysql_data` 命名 volume；普通停止不会删除。Redis 不发布宿主机端口，限流窗口只保存在 tmpfs，Redis 容器停止或重建后不会恢复。
+
+### 3. localhost 代理排错
+
+如果客户端收到 502，但应用日志中完全没有对应请求，localhost 请求可能意外经过了系统或 shell 的 HTTP、HTTPS、SOCKS/`ALL_PROXY` 代理。可以先检查代理设置：
+
+```bash
+env | grep -iE '^(http|https|all|no)_proxy='
+```
+
+调试单次请求时使用 `curl --noproxy "*" ...`，或为当前 shell 正确设置：
+
+```bash
+export NO_PROXY=localhost,127.0.0.1
+```
+
+不需要为了本项目关闭全部网络代理。
+
+### 4. 核心 API smoke
+
+以下流程使用明显的本地演示账号，不包含真实凭据，也不执行删除操作。
+
+1. health（预期 200）：
+
+   ```bash
+   curl --noproxy "*" --include http://127.0.0.1:8000/health
+   ```
+
+2. 注册（预期 201；重复执行同一 username 会返回 409）：
+
+   ```bash
+   curl --noproxy "*" --include \
+     --request POST http://127.0.0.1:8000/users/register \
+     --header 'Content-Type: application/json' \
+     --data '{"username":"local_demo_user","password":"local_demo_password_123"}'
+   ```
+
+3. 登录（预期 200）：
+
+   ```bash
+   curl --noproxy "*" --include \
+     --request POST http://127.0.0.1:8000/users/login \
+     --header 'Content-Type: application/x-www-form-urlencoded' \
+     --data-urlencode 'username=local_demo_user' \
+     --data-urlencode 'password=local_demo_password_123'
+   ```
+
+   从响应中复制 `access_token`，再使用隐藏输入保存到当前 shell；不要把真实 Token 写入文档或命令历史：
+
+   ```bash
+   printf 'Paste local access_token: '
+   read -rs DEMO_TOKEN
+   printf '\n'
+   ```
+
+4. 创建 Workspace（预期 201）：
+
+   ```bash
+   curl --noproxy "*" --include \
+     --request POST http://127.0.0.1:8000/workspaces \
+     --header "Authorization: Bearer ${DEMO_TOKEN}" \
+     --header 'Content-Type: application/json' \
+     --data '{"name":"Local Demo Workspace"}'
+   ```
+
+   从响应中复制 Workspace `id`：
+
+   ```bash
+   printf 'Paste workspace id: '
+   read -r DEMO_WORKSPACE_ID
+   ```
+
+5. 创建 Task（预期 201）：
+
+   ```bash
+   curl --noproxy "*" --include \
+     --request POST "http://127.0.0.1:8000/workspaces/${DEMO_WORKSPACE_ID}/tasks" \
+     --header "Authorization: Bearer ${DEMO_TOKEN}" \
+     --header 'Content-Type: application/json' \
+     --data '{"title":"Local smoke task","description":"Fresh-clone smoke check","priority":2}'
+   ```
+
+6. 查询 Task 列表（预期 200）：
+
+   ```bash
+   curl --noproxy "*" --include \
+     --header "Authorization: Bearer ${DEMO_TOKEN}" \
+     "http://127.0.0.1:8000/workspaces/${DEMO_WORKSPACE_ID}/tasks"
+   ```
+
+### 5. 配置并运行测试
 
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
+```
+
+测试必须使用与开发、预发布和生产完全分离、可随时销毁的 MySQL 测试数据库。为它创建非 root、最小权限账号，权限只覆盖该测试数据库；数据库名必须为小写字母、数字、下划线，并以 `_test_db` 结尾。测试 Schema 可以与本地开发 Schema 位于同一个本地 MySQL 容器，但必须使用不同 Schema 和不同账号。
+
+如果第 2 节的 Compose 栈尚未启动，先启动 MySQL 9.7.2 `db` service 并等待其 healthy：
+
+```bash
+docker compose up -d db
+docker compose ps db
+```
+
+确认 service 名为 `db` 后，使用交互式密码提示进入容器内的 MySQL；命令行不包含 root 密码：
+
+```bash
+docker compose exec db mysql -uroot -p
+```
+
+在 MySQL 提示符中执行以下本地测试环境初始化 SQL，并先将 `<TEST_PASSWORD>` 替换为仅供本机测试使用的密码：
+
+```sql
+CREATE DATABASE task_api_local_test_db;
+CREATE USER 'task_api_test'@'%' IDENTIFIED BY '<TEST_PASSWORD>';
+GRANT ALL PRIVILEGES
+    ON task_api_local_test_db.*
+    TO 'task_api_test'@'%';
+```
+
+这些语句未任意指定字符集或排序规则，因此测试 Schema 继承当前 MySQL 容器的服务器默认值。`task_api_test` 只获得 `task_api_local_test_db.*` 权限；它不是 root，也不是 API 的开发运行账号。这组 SQL 只用于本地测试环境，不得复制到生产环境。
+
+在 `.env` 中设置以下三项，并把尖括号占位符替换为实际的本机测试配置：
+
+```dotenv
+DATABASE_URL=mysql+pymysql://<DEV_USER>:<DEV_PASSWORD>@127.0.0.1:<DEV_PORT>/<DEV_DATABASE>
+TEST_DATABASE_URL=mysql+pymysql://task_api_test:<URL_ENCODED_TEST_PASSWORD>@127.0.0.1:3307/task_api_local_test_db
+TEST_DATABASE_RESET_ALLOWED=true
+```
+
+如果测试密码包含 `@`、`:`、`/`、`#` 等 URL 特殊字符，写入 `TEST_DATABASE_URL` 前必须对密码部分做 URL 编码。不要把真实密码写入仓库或文档。
+
+安全门禁会拒绝缺失或非 MySQL URL、开发/测试 URL 相同、库名相同、受保护库名、未匹配 `*_test_db` 或未显式允许重置的配置。fixture 会对 `TEST_DATABASE_URL` 指向的 Schema 执行 `drop_all()`/`create_all()`；严禁将它指向开发、预发布或生产数据库。
+
+Docker daemon 必须可用。默认测试会创建精确命名、loopback-only、tmpfs、无持久 volume 的临时 MySQL 约束探针和 Redis Lua/并发探针，并在 fixture cleanup 中删除它们；迁移测试只操作已通过门禁的专用测试数据库。
+
+```bash
 python -m pytest
 ```
 
-测试必须使用专用、可销毁的 MySQL 数据库：
+`pytest.ini` 开启分支覆盖率并要求至少 85%。测试完成后可确认探针没有残留；正常结果是不输出任何名称：
 
-- `TEST_DATABASE_URL` 必须存在、使用 MySQL、数据库名匹配 `*_test_db`，且与 `DATABASE_URL` 和受保护库名不同。
-- `TEST_DATABASE_RESET_ALLOWED=true` 是执行测试的显式销毁许可。
-- fixture 会执行 `drop_all()`/`create_all()`；不要指向开发、预发布或生产数据库。
-- 建议使用仅拥有测试库权限的非 root 账号；CI 强制使用该方式。
-- 默认测试包含真实 MySQL 约束探针、Alembic 往返/不可逆边界测试、真实 Redis Lua 并发探针、权限矩阵、事务回滚和确定性并发测试，因此需要本机 Docker daemon。
+```bash
+docker ps -a --format '{{.Names}}' \
+  | grep -E '^task_test_(mysql_constraint|redis_rate_limit)_' || true
+```
+
+若出现残留，先记录并检查精确容器名；不要使用 `docker system prune` 或宽泛删除命令。只在确认目标后按精确名称处理。
+
+### 6. 停止与清理
+
+普通停止会移除 Compose 容器和网络，但保留 MySQL `mysql_data`：
+
+```bash
+docker compose down
+```
+
+以下命令会永久删除本项目的 MySQL volume 和其中数据，只能在明确决定销毁本地数据时使用：
+
+```bash
+docker compose down --volumes
+```
+
+Redis 限流状态位于 tmpfs，停止或重建 Redis 容器即会清空。测试探针正常由 fixture 精确清理；不要用宽泛 Docker 清理命令代替测试自身的 cleanup。
 
 ## 持续集成
 
