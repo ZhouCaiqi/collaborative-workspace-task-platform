@@ -1,6 +1,10 @@
-# Task Management API
+# Collaborative Workspace Task Platform
 
-一个基于 FastAPI 的多人协作任务管理后端。项目从单用户 Task CRUD 演进为以 Workspace 为边界的协作系统，覆盖固定角色权限、成员管理、任务状态与指派工作流、数据库迁移、Redis API 限流和自动化测试。
+[![CI](https://github.com/ZhouCaiqi/collaborative-workspace-task-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ZhouCaiqi/collaborative-workspace-task-platform/actions/workflows/ci.yml)
+
+基于工作空间的多人协作任务平台。
+
+后端基于 FastAPI，从单用户 Task CRUD 演进为以 Workspace 为边界的协作系统，覆盖固定角色权限、成员管理、任务状态与指派工作流、数据库迁移、Redis API 限流和自动化测试。
 
 当前仓库只包含后端 API；没有前端页面，也没有公开部署地址。
 
@@ -245,8 +249,8 @@ Task 列表支持：`status`、`priority`、`assignee_id`、`unassigned`、`limi
 前置条件：Git、Docker、Docker Compose，以及可用的 8000/3307 宿主机端口。当前没有已知的 Apple Silicon 专用步骤。
 
 ```bash
-git clone https://github.com/ZhouCaiqi/task-management-api.git
-cd task-management-api
+git clone https://github.com/ZhouCaiqi/collaborative-workspace-task-platform.git
+cd collaborative-workspace-task-platform
 cp .env.example .env
 ```
 

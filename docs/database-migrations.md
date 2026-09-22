@@ -1,6 +1,6 @@
-# 数据库迁移说明
+# Collaborative Workspace Task Platform 数据库迁移说明
 
-本项目使用 Alembic 管理 MySQL Schema。当前迁移历史是单一线性链，唯一 head 为 `e5a1c7d9b302`。
+Collaborative Workspace Task Platform 使用 Alembic 管理 MySQL Schema。当前迁移历史是单一线性链，唯一 head 为 `e5a1c7d9b302`。
 
 本文描述迁移代码的真实行为，不包含任何开发数据库凭据、业务数据、备份位置或环境专用连接信息。
 

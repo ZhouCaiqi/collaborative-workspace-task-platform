@@ -26,7 +26,10 @@ async def lifespan(_app: FastAPI):
     close_rate_limiter()
 
 
-app = FastAPI(title="Task Management API", lifespan=lifespan)
+app = FastAPI(
+    title="Collaborative Workspace Task Platform API",
+    lifespan=lifespan,
+)
 
 app.include_router(tasks_router)
 app.include_router(users_router)

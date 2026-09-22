@@ -1,6 +1,6 @@
-# 架构说明
+# Collaborative Workspace Task Platform 架构说明
 
-本文描述当前仓库在 Alembic head `e5a1c7d9b302` 下的实现。它补充 README 中的快速介绍，重点解释请求边界、模块职责、事务、并发、限流和测试分层。
+本文描述 Collaborative Workspace Task Platform 在 Alembic head `e5a1c7d9b302` 下的实现。它补充 README 中的快速介绍，重点解释请求边界、模块职责、事务、并发、限流和测试分层。
 
 ## 系统边界
 
